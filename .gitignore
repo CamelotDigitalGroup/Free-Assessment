@@ -1,0 +1,21 @@
+# Assessment output — never commit customer data
+Output/
+*.json
+*.xlsx
+*.csv
+*.html
+*.pdf
+Assessment_Results_*
+Assessment_Workbook_*
+Assessment_Report_*
+
+# Certificates / secrets — never commit
+*.pfx
+*.cer
+*.pem
+*.key
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
