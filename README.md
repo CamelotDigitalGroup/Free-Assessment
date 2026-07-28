@@ -47,8 +47,8 @@ Each control is scored **PASS / FAIL / WARN / MANUAL** with a severity rating.
 
 ## Quick start
 
-> Full, click-by-click setup is in **[docs/01-APP-REGISTRATION.md](docs/01-APP-REGISTRATION.md)**
-> and **[docs/02-RUNNING-THE-ASSESSMENT.md](docs/02-RUNNING-THE-ASSESSMENT.md)**.
+> Full, click-by-click setup is in **[docs/01-APP-REGISTRATION.md](01-APP-REGISTRATION.md)**
+> and **[docs/02-RUNNING-THE-ASSESSMENT.md](02-RUNNING-THE-ASSESSMENT.md)**.
 
 ```powershell
 # 1) Run the assessment (read-only) against your tenant
