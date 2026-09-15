@@ -2,7 +2,7 @@
 
 # Camelot Digital Group — Free Microsoft 365 Security Assessment
 
-**A read-only, certificate-authenticated security assessment for Microsoft 365 tenants — fully open source, so you can read every line before you run it.**
+**A read-only security assessment for Microsoft 365 tenants — fully open source, so you can read every line before you grant a thing.**
 
 [![PowerShell](https://img.shields.io/badge/PowerShell-7.2%2B-5391FE?logo=powershell&logoColor=white)](https://learn.microsoft.com/powershell/)
 [![Microsoft 365](https://img.shields.io/badge/Microsoft%20365-Graph%20%2B%20Exchange%20Online-D83B01?logo=microsoft&logoColor=white)](https://learn.microsoft.com/graph/)
@@ -16,15 +16,26 @@
 
 ## What this is
 
-This repository contains the two PowerShell scripts Camelot Digital Group uses to run its
-**Advanced** Microsoft 365 security assessment — the supervised, certificate-based review that
-goes deepest, including a full **Exchange Online** analysis across all seven Microsoft 365
-security domains.
+Camelot Digital Group runs its Microsoft 365 security assessment in two tiers, and **both
+scripts are published here** — not just the one you'd expect:
+
+| | Free / Essential | Advanced |
+| --- | --- | --- |
+| **Script** | [`essential-tier/M365-SecurityAssessment.ps1`](essential-tier/) | [`M365-SecurityAssessment.ps1`](M365-SecurityAssessment.ps1) *(this folder)* |
+| **How it runs** | Automatically — Camelot's own backend runs it the moment you grant consent on our website. You never touch PowerShell. | Manually — you (or we, live on a screen-share) run it yourself, following the setup below. |
+| **Auth** | OAuth client-secret, Graph-only | Certificate-based app-only, including Exchange Online + Teams |
+| **Scope** | Entra ID, Intune, SharePoint/OneDrive, Defender, Purview | All of the above **plus** deep Exchange Online and Teams analysis |
+
+This top-level folder and the rest of this README cover the **Advanced** tier — the
+supervised, certificate-based review you set up and run yourself (or we run live with you).
+If you're checking what actually ran against your tenant after requesting the **free**
+assessment from the website, see [`essential-tier/`](essential-tier/) instead — that's a
+genuinely different script, not the same one with different flags.
 
 | Script | What it does |
 | ------ | ------------ |
 | **`M365-SecurityAssessment.ps1`** | Connects to your tenant **read-only** using certificate-based app authentication, evaluates 65 security controls (71 individual checks) across Entra ID, Exchange, Teams, Intune, SharePoint/OneDrive, Defender and Purview, and writes a structured JSON results file plus an Excel workbook of the raw evidence. |
-| **`New-M365Report.ps1`** | Turns that JSON into a branded, self-contained **HTML report** and renders it to **PDF** — clear findings, severities and recommendations, ready to hand to leadership. |
+| **`New-M365Report.ps1`** | Turns that JSON into a branded, self-contained **HTML report** and renders it to **PDF** — clear findings, severities and recommendations, ready to hand to leadership. Shared, byte-for-byte, by both tiers. |
 
 Everything is **read-only**. The scripts can never change, delete, move or send anything in
 your environment, and they never read the contents of your emails or files.
