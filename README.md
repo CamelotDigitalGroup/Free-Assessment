@@ -47,8 +47,12 @@ Each control is scored **PASS / FAIL / WARN / MANUAL** with a severity rating.
 
 ## Quick start
 
-> Full, click-by-click setup is in **[docs/01-APP-REGISTRATION.md](01-APP-REGISTRATION.md)**
-> and **[docs/02-RUNNING-THE-ASSESSMENT.md](02-RUNNING-THE-ASSESSMENT.md)**.
+> Full, click-by-click setup is in **[docs/01-APP-REGISTRATION.md](docs/01-APP-REGISTRATION.md)**
+> and **[docs/02-RUNNING-THE-ASSESSMENT.md](docs/02-RUNNING-THE-ASSESSMENT.md)**.
+>
+> Prefer infrastructure-as-code? The whole Entra setup (app registration, read-only
+> permissions, admin consent, certificate upload and directory role) can be provisioned
+> automatically with the **[Terraform module in `terraform/`](terraform/README.md)**.
 
 ```powershell
 # 1) Run the assessment (read-only) against your tenant
@@ -72,7 +76,7 @@ Each control is scored **PASS / FAIL / WARN / MANUAL** with a severity rating.
 | Requirement | Notes |
 | ----------- | ----- |
 | **PowerShell 7.2+** | Recommended on Windows. `pwsh` cross-platform also works for the Graph portion. |
-| **An Entra app registration** | Multi-domain, app-only, with a certificate — see [docs/01-APP-REGISTRATION.md](docs/01-APP-REGISTRATION.md). |
+| **An Entra app registration** | App-only, with a certificate — set up manually via [docs/01-APP-REGISTRATION.md](docs/01-APP-REGISTRATION.md), or automatically with the [Terraform module](terraform/README.md). |
 | **A certificate** | Self-signed is fine. Public key uploaded to the app; private key installed in your local certificate store. |
 | **`ExchangeOnlineManagement` module** | For the Exchange Online domain. If missing, Exchange checks are skipped gracefully. `Install-Module ExchangeOnlineManagement` |
 | **`ImportExcel` module** *(optional)* | For the `.xlsx` evidence workbook. If missing, raw data falls back to CSV. `Install-Module ImportExcel` |

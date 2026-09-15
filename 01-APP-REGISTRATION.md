@@ -1,8 +1,9 @@
 # 1. Create the app registration & certificate
 
 This assessment authenticates to Microsoft 365 as an **app** (app-only), using a **certificate**
-instead of a password. This page walks you through the one-time setup. It takes about 15 minutes
-and a Global Administrator (or Privileged Role Administrator) is required to grant consent.
+instead of a password. This page walks you through the one-time setup. It takes about 20 minutes
+and a Global Administrator (or Privileged Role Administrator) is required to grant consent and
+assign directory roles.
 
 ---
 
@@ -43,9 +44,17 @@ and a Global Administrator (or Privileged Role Administrator) is required to gra
 3. **Add a permission → APIs my organization uses →** search **Office 365 Exchange Online →
    Application permissions →** add **`Exchange.ManageAsApp`**.
 
+### Skype and Teams Tenant Admin API (application permission)
+
+Without this, the Teams checks (section 3) silently fall back to manual review rather than
+erroring - easy to miss unless you're specifically looking for it.
+
+4. **Add a permission → APIs my organization uses →** search **Skype and Teams Tenant Admin API →**
+   **Application permissions →** add **`application_access`**.
+
 ### Grant consent
 
-4. Click **Grant admin consent for &lt;your tenant&gt;** and confirm. All permissions should show a green tick.
+5. Click **Grant admin consent for &lt;your tenant&gt;** and confirm. All permissions should show a green tick.
 
 ---
 
@@ -83,11 +92,20 @@ Export-Certificate -Cert $cert -FilePath "$HOME\M365SecurityAssessment.cer"
 
 ---
 
-## 5. Assign a directory role (for audit-log / Purview checks)
+## 5. Assign directory roles
+
+Two separate roles are needed, for two separate reasons - the API permissions above only grant
+*Graph/Exchange* access; Teams PowerShell cmdlets (`Get-Cs*`) are authorised by directory role
+membership instead, not by an API permission grant.
 
 1. Go to **Identity → Roles & admins → Roles & admins**.
-2. Open **Global Reader** *(or **Compliance Reader**)*.
-3. **Add assignments →** search for your app by name → add it.
+2. Open **Global Reader** *(or **Compliance Reader**)* - for audit-log / Purview checks.
+   **Add assignments →** search for your app by name → add it.
+3. Open **Teams Administrator** - required for the Teams checks (section 3) to return real
+   results rather than falling back to manual review. If this is the first time anything in your
+   tenant has used this role, it may not appear in the list until you search for it by name; the
+   portal activates it automatically the first time you add an assignment.
+   **Add assignments →** search for your app by name → add it.
 
 ---
 

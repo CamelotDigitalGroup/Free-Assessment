@@ -1,6 +1,20 @@
 <#
 .SYNOPSIS
-    M365 Cloud Security Assessment Script
+    M365 Cloud Security Assessment Script - ADVANCED TIER (certificate-based,
+    full Exchange/Teams coverage). Run manually by Camelot staff during a
+    supervised, white-glove assessment - see this repo's own README.md.
+    This is the version published to the public GitHub repo.
+
+    NOT the script the automated free-assessment funnel on
+    camelotdigitalgroup.com actually runs for the self-serve Essential
+    tier - that's a separate, Graph-only/client-secret variant living in
+    the camelot-website repo at website/free-assessment-scripts/ (not
+    published here, since it authenticates via Camelot's own multi-tenant
+    app registration rather than a customer-provided certificate). Both
+    happen to share this filename; don't assume a change here also needs
+    making there; the report renderer (New-M365Report.ps1) IS shared
+    between them, since JSON->HTML rendering is genuinely tier-agnostic.
+
     Reverse-engineered to reproduce the Sourcepass Cloud Assessment Report
     covering all 7 domains: Entra ID, Exchange, Teams, Intune,
     SharePoint/OneDrive, Defender, and Purview.
@@ -27,7 +41,7 @@
         Sites.Read.All                 SharePoint full-tenant site enumeration
                                        (/sites/getAllSites) + per-site sharing links
         SharePointTenantSettings.Read.All  SharePoint tenant-wide sharing settings
-                                       (/admin/sharepoint/settings) — OPTIONAL;
+                                       (/admin/sharepoint/settings) - OPTIONAL;
                                        if missing, sharingCapability reports 'unknown'
         Reports.Read.All               usage / MFA registration reports
         RoleManagement.Read.Directory  role assignments (PIM check)
@@ -86,12 +100,12 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-#region ── Helpers ────────────────────────────────────────────────────────────
+#region -- Helpers ------------------------------------------------------------
 
 function Write-Section { param([string]$Title)
-    Write-Host "`n$('─' * 70)" -ForegroundColor DarkGray
+    Write-Host "`n$('-' * 70)" -ForegroundColor DarkGray
     Write-Host "  $Title" -ForegroundColor Cyan
-    Write-Host "$('─' * 70)" -ForegroundColor DarkGray
+    Write-Host "$('-' * 70)" -ForegroundColor DarkGray
 }
 
 function Write-Check { param([string]$Name,[string]$Status,[string]$Detail='')
@@ -135,11 +149,18 @@ function Invoke-GraphAll {
     do {
         $resp = Invoke-RestMethod -Uri $next -Headers $Headers -Method GET
         if ($null -ne $resp.value) { $all.AddRange([object[]]$resp.value) }
-        # Safe property access — avoids strict-mode crash when nextLink is absent
+        # Safe property access - avoids strict-mode crash when nextLink is absent
         $nextProp = $resp.PSObject.Properties['@odata.nextLink']
         $next     = if ($nextProp) { $nextProp.Value } else { $null }
     } while ($next)
-    return $all
+    # Unary comma is required: PowerShell unwraps a single-element collection
+    # to its bare scalar element when it crosses a function return/pipeline
+    # boundary, silently discarding .Count. Confirmed live: a tenant with
+    # exactly one matching config profile/update ring/dynamic group crashed
+    # every caller of this function under Set-StrictMode's .Count check -
+    # every other caller (e.g. EnterpriseApps, 507 results) only "worked" by
+    # having more than one result, not because it was actually safe.
+    return ,$all
 }
 
 # Strict-mode-safe nested property accessor.
@@ -164,7 +185,7 @@ function Get-GraphToken {
         [string]$Scope = 'https://graph.microsoft.com/.default'
     )
 
-    # ── Load certificate (check LocalMachine first, then CurrentUser) ──────
+    # -- Load certificate (check LocalMachine first, then CurrentUser) ------
     $cert = Get-ChildItem Cert:\LocalMachine\My\$Thumbprint -ErrorAction SilentlyContinue
     if (-not $cert) {
         $cert = Get-ChildItem Cert:\CurrentUser\My\$Thumbprint -ErrorAction Stop
@@ -173,12 +194,12 @@ function Get-GraphToken {
         throw "Certificate with thumbprint '$Thumbprint' not found in LocalMachine\My or CurrentUser\My."
     }
 
-    # ── Base64Url helper (strips padding, URL-safe chars) ──────────────────
+    # -- Base64Url helper (strips padding, URL-safe chars) ------------------
     function ConvertTo-B64Url ([byte[]]$Bytes) {
         [Convert]::ToBase64String($Bytes) -replace '\+','-' -replace '/','_' -replace '=',''
     }
 
-    # ── JWT Header ─────────────────────────────────────────────────────────
+    # -- JWT Header ---------------------------------------------------------
     # x5t = base64url of the certificate's SHA-1 thumbprint bytes
     $headerJson = [ordered]@{
         alg = 'RS256'
@@ -187,7 +208,7 @@ function Get-GraphToken {
     } | ConvertTo-Json -Compress
     $headerB64 = ConvertTo-B64Url ([Text.Encoding]::UTF8.GetBytes($headerJson))
 
-    # ── JWT Payload ────────────────────────────────────────────────────────
+    # -- JWT Payload --------------------------------------------------------
     $now = [DateTimeOffset]::UtcNow
     $payloadJson = [ordered]@{
         aud = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token"
@@ -199,15 +220,15 @@ function Get-GraphToken {
     } | ConvertTo-Json -Compress
     $payloadB64 = ConvertTo-B64Url ([Text.Encoding]::UTF8.GetBytes($payloadJson))
 
-    # ── Sign header.payload with RSA-SHA256 ────────────────────────────────
-    # Use GetRSAPrivateKey() — supports both modern CNG and legacy CAPI certs.
+    # -- Sign header.payload with RSA-SHA256 --------------------------------
+    # Use GetRSAPrivateKey() - supports both modern CNG and legacy CAPI certs.
     # $cert.PrivateKey only works on CAPI and silently returns null for CNG.
     $toSign      = "$headerB64.$payloadB64"
     $toSignBytes = [Text.Encoding]::UTF8.GetBytes($toSign)
 
     $rsaKey = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert)
     if ($rsaKey) {
-        # CNG path (RSACng / RSAOpenSsl) — works on Windows 8+ / PowerShell 5.1+
+        # CNG path (RSACng / RSAOpenSsl) - works on Windows 8+ / PowerShell 5.1+
         $sigBytes = $rsaKey.SignData(
             $toSignBytes,
             [Security.Cryptography.HashAlgorithmName]::SHA256,
@@ -222,7 +243,7 @@ function Get-GraphToken {
 
     $jwt = "$toSign.$(ConvertTo-B64Url $sigBytes)"
 
-    # ── Token request ──────────────────────────────────────────────────────
+    # -- Token request ------------------------------------------------------
     # FIX: client_assertion_type must be 'client-assertion-type', NOT 'grant-type'
     $tokenBody = @{
         grant_type            = 'client_credentials'
@@ -241,7 +262,7 @@ function Get-GraphToken {
 
 #endregion
 
-#region ── Prerequisites ──────────────────────────────────────────────────────
+#region -- Prerequisites ------------------------------------------------------
 
 if (-not (Test-Path $OutputFolder)) { New-Item $OutputFolder -ItemType Directory | Out-Null }
 
@@ -251,12 +272,12 @@ if (-not (Get-Module ExchangeOnlineManagement -ListAvailable)) {
     $SkipExchange = $true
 } else { $SkipExchange = $false }
 
-# Verify ImportExcel (for XLSX output – optional, falls back to CSV)
+# Verify ImportExcel (for XLSX output - optional, falls back to CSV)
 $HasImportExcel = [bool](Get-Module ImportExcel -ListAvailable)
 
 #endregion
 
-#region ── Authentication ─────────────────────────────────────────────────────
+#region -- Authentication -----------------------------------------------------
 
 Write-Section "Authenticating"
 
@@ -286,18 +307,18 @@ if (-not $SkipExchange) {
 
 #endregion
 
-#region ── Raw Data Collection ────────────────────────────────────────────────
+#region -- Raw Data Collection ------------------------------------------------
 
 Write-Section "Collecting raw data from Graph API"
 
-# ── Organisation ─────────────────────────────────────────────────────────────
+# -- Organisation -------------------------------------------------------------
 Write-Host "  [1/30] Organisation..." -NoNewline
 # Reuse the response already fetched during authentication (saves one Graph call)
 $Org           = $OrgInfo.value[0]
 $DefaultDomain = ($Org.verifiedDomains | Where-Object { $_.isDefault } | Select-Object -First 1).name
 Write-Host " $DefaultDomain" -ForegroundColor Green
 
-# ── Secure Score ─────────────────────────────────────────────────────────────
+# -- Secure Score -------------------------------------------------------------
 Write-Host "  [2/30] Secure Score..." -NoNewline
 try {
     $SecureScoreAll = (Invoke-RestMethod `
@@ -307,7 +328,7 @@ try {
     $SecureScorePct = [math]::Round(($SecureScore.currentScore / $SecureScore.maxScore) * 100, 0)
     Write-Host " $($SecureScore.currentScore)/$($SecureScore.maxScore) ($SecureScorePct%)" -ForegroundColor Green
 } catch {
-    Write-Host " SKIPPED (SecurityEvents.Read.All missing — grant admin consent)" -ForegroundColor Yellow
+    Write-Host " SKIPPED (SecurityEvents.Read.All missing - grant admin consent)" -ForegroundColor Yellow
     $SecureScore    = [PSCustomObject]@{ currentScore = 0; maxScore = 0 }
     $SecureScorePct = 0
 }
@@ -321,7 +342,7 @@ try {
     $SecureScoreHistory = @()
 }
 
-# ── Users ─────────────────────────────────────────────────────────────────────
+# -- Users ---------------------------------------------------------------------
 Write-Host "  [3/30] Users (all)..." -NoNewline
 try {
     $AllUsers = Invoke-GraphAll `
@@ -346,7 +367,7 @@ $DormantUsers = @($EnabledUsers | Where-Object {
     ([datetime]$sia.Value.lastSignInDateTime -lt $CutoffDate)
 })
 
-# ── MFA Registration ─────────────────────────────────────────────────────────
+# -- MFA Registration ---------------------------------------------------------
 Write-Host "  [4/30] MFA registration report..." -NoNewline
 try {
     $MfaReg = Invoke-GraphAll `
@@ -370,7 +391,7 @@ $WeakMfaUsers = @($MfaReg | Where-Object {
           $_.methodsRegistered -contains 'softwareOneTimePasscode')
 })
 
-# ── Risky Users ───────────────────────────────────────────────────────────────
+# -- Risky Users ---------------------------------------------------------------
 # Requires IdentityRiskyUser.Read.All + Entra ID P2 (included in E5).
 # Max page size for this endpoint is 100; filter locally after fetching.
 Write-Host "  [5/30] Risky users..." -NoNewline
@@ -384,11 +405,11 @@ try {
     })
     Write-Host " $($RiskyUsers.Count) active (of $($AllRiskyUsers.Count) total)" -ForegroundColor Green
 } catch {
-    Write-Host " SKIPPED — $($_.Exception.Message)" -ForegroundColor Yellow
+    Write-Host " SKIPPED - $($_.Exception.Message)" -ForegroundColor Yellow
     $RiskyUsers = @()
 }
 
-# ── Directory Roles ───────────────────────────────────────────────────────────
+# -- Directory Roles -----------------------------------------------------------
 Write-Host "  [6/30] Directory roles..." -NoNewline
 try {
     $DirectoryRoles  = Invoke-GraphAll `
@@ -402,7 +423,7 @@ try {
     $DirectoryRoles = @(); $GlobalAdmins = @()
 }
 
-# ── Conditional Access Policies ───────────────────────────────────────────────
+# -- Conditional Access Policies -----------------------------------------------
 Write-Host "  [7/30] Conditional Access Policies..." -NoNewline
 try {
     $CAPolicies = Invoke-GraphAll `
@@ -414,7 +435,62 @@ try {
     $CAPolicies = @()
 }
 
-# ── Authorization Policy ──────────────────────────────────────────────────────
+# -- OAuth delegated consent grants (for 1.25) ----------------------------------
+# Tenant-wide in one call - not the *policy* on future consent (that's 1.7),
+# this is the actual inventory of what's already been granted. The classic
+# illicit-consent-grant attack (malicious "Enable editing"-style OAuth apps)
+# lives here, not in the consent policy setting.
+Write-Host "  [+] OAuth delegated consent grants..." -NoNewline
+$OAuth2Grants = @()
+try {
+    $OAuth2Grants = Invoke-GraphAll `
+        -Uri "https://graph.microsoft.com/v1.0/oauth2PermissionGrants" `
+        -Headers $GraphHeaders
+    Write-Host " $($OAuth2Grants.Count)" -ForegroundColor Green
+} catch {
+    Write-Host " SKIPPED ($($_.Exception.Message))" -ForegroundColor Yellow
+}
+
+# -- Application permission grants on Microsoft Graph (for 1.25) ---------------
+# One call against Graph's own service principal rather than iterating every
+# app in the tenant (hundreds of calls) - covers the resource this attack
+# pattern most commonly targets.
+Write-Host "  [+] Application permission grants (Microsoft Graph)..." -NoNewline
+$AppRoleGrants = @()
+$GraphAppRoleNames = @{}
+try {
+    $AppRoleGrants = Invoke-GraphAll `
+        -Uri "https://graph.microsoft.com/v1.0/servicePrincipals(appId='00000003-0000-0000-c000-000000000000')/appRoleAssignedTo" `
+        -Headers $GraphHeaders
+    Write-Host " $($AppRoleGrants.Count)" -ForegroundColor Green
+    # Resolve appRoleId -> readable permission name (e.g. "Mail.ReadWrite")
+    # for the grants just collected - one extra call, only worth making if
+    # there's anything to resolve.
+    if ($AppRoleGrants.Count -gt 0) {
+        $graphSp = Invoke-RestMethod `
+            -Uri "https://graph.microsoft.com/v1.0/servicePrincipals(appId='00000003-0000-0000-c000-000000000000')?`$select=appRoles" `
+            -Headers $GraphHeaders
+        foreach ($role in @($graphSp.appRoles)) {
+            $GraphAppRoleNames[[string]$role.id] = [string]$role.value
+        }
+    }
+} catch {
+    Write-Host " SKIPPED ($($_.Exception.Message))" -ForegroundColor Yellow
+}
+
+# -- Application registration credentials (for 1.26) ---------------------------
+Write-Host "  [+] Application registration credentials..." -NoNewline
+$AppRegistrations = @()
+try {
+    $AppRegistrations = Invoke-GraphAll `
+        -Uri "https://graph.microsoft.com/v1.0/applications?`$select=id,displayName,keyCredentials,passwordCredentials" `
+        -Headers $GraphHeaders
+    Write-Host " $($AppRegistrations.Count)" -ForegroundColor Green
+} catch {
+    Write-Host " SKIPPED ($($_.Exception.Message))" -ForegroundColor Yellow
+}
+
+# -- Authorization Policy ------------------------------------------------------
 Write-Host "  [8/30] Authorization policy..." -NoNewline
 try {
     $AuthPolicy = Invoke-RestMethod `
@@ -430,7 +506,7 @@ try {
     }
 }
 
-# ── Password Expiry Policy ────────────────────────────────────────────────────
+# -- Password Expiry Policy ----------------------------------------------------
 Write-Host "  [9/30] Password expiry domains..." -NoNewline
 try {
     $Domains = Invoke-GraphAll `
@@ -442,7 +518,7 @@ try {
     $Domains = @()
 }
 
-# ── Devices ───────────────────────────────────────────────────────────────────
+# -- Devices -------------------------------------------------------------------
 Write-Host "  [10/30] Devices (Entra)..." -NoNewline
 try {
     $EntraDevices = Invoke-GraphAll `
@@ -460,7 +536,7 @@ $StaleDevices = @($EntraDevices | Where-Object {
     $lsi -and $lsi.Value -and [datetime]$lsi.Value -lt $StaleDate
 })
 
-# ── Intune – Device Compliance ────────────────────────────────────────────────
+# -- Intune - Device Compliance ------------------------------------------------
 Write-Host "  [11/30] Intune managed devices..." -NoNewline
 try {
     $IntuneDevices = Invoke-GraphAll `
@@ -476,7 +552,7 @@ $NonCompliantDevices = @($IntuneDevices | Where-Object { $_.complianceState -eq 
 $NotEncryptedDevices = @($IntuneDevices | Where-Object { $_.isEncrypted -eq $false })
 $PersonalDevices     = @($IntuneDevices | Where-Object { $_.managedDeviceOwnerType -eq 'personal' })
 
-# ── Intune – Compliance Policies ─────────────────────────────────────────────
+# -- Intune - Compliance Policies ---------------------------------------------
 Write-Host "  [12/30] Intune compliance policies..." -NoNewline
 try {
     $CompliancePolicies = Invoke-GraphAll `
@@ -488,7 +564,7 @@ try {
     $CompliancePolicies = @()
 }
 
-# ── Intune – Configuration Profiles ──────────────────────────────────────────
+# -- Intune - Configuration Profiles ------------------------------------------
 Write-Host "  [13/30] Intune configuration profiles..." -NoNewline
 try {
     $ConfigProfiles = Invoke-GraphAll `
@@ -500,7 +576,7 @@ try {
     $ConfigProfiles = @()
 }
 
-# ── Intune – Software Update Rings ────────────────────────────────────────────
+# -- Intune - Software Update Rings --------------------------------------------
 Write-Host "  [14/30] Intune update rings..." -NoNewline
 try {
     $UpdateRings = Invoke-GraphAll `
@@ -512,7 +588,7 @@ try {
     $UpdateRings = @()
 }
 
-# ── Intune – App Protection Policies ─────────────────────────────────────────
+# -- Intune - App Protection Policies -----------------------------------------
 Write-Host "  [15/30] App protection policies..." -NoNewline
 try {
     $AppProtectioniOS     = (Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/deviceAppManagement/iosManagedAppProtections"    -Headers $GraphHeaders).value
@@ -523,7 +599,7 @@ try {
     $AppProtectioniOS = @(); $AppProtectionAndroid = @()
 }
 
-# ── Intune – Security Baselines ───────────────────────────────────────────────
+# -- Intune - Security Baselines -----------------------------------------------
 # /deviceManagement/intents is beta-only; v1.0 returns 400.
 # Use the beta endpoint and filter locally for assigned baselines.
 Write-Host "  [16/30] Security baseline profiles..." -NoNewline
@@ -541,9 +617,9 @@ try {
     $SecurityBaselines = @()
 }
 
-# ── Intune – LAPS ─────────────────────────────────────────────────────────────
+# -- Intune - LAPS -------------------------------------------------------------
 Write-Host "  [17/30] LAPS configuration..." -NoNewline
-# Wrap in @() — strict mode throws .Count on a single object returned by Where-Object
+# Wrap in @() - strict mode throws .Count on a single object returned by Where-Object
 $LapsPolicy = @($ConfigProfiles | Where-Object {
     $_.displayName -match 'LAPS|Local Admin' -or
     ($_.PSObject.Properties['@odata.type'] -and
@@ -551,7 +627,7 @@ $LapsPolicy = @($ConfigProfiles | Where-Object {
 })
 Write-Host " $($LapsPolicy.Count) matching profiles" -ForegroundColor Green
 
-# ── Enterprise Applications ────────────────────────────────────────────────────
+# -- Enterprise Applications ----------------------------------------------------
 Write-Host "  [18/30] Enterprise applications (service principals)..." -NoNewline
 try {
     $EnterpriseApps = Invoke-GraphAll `
@@ -563,7 +639,7 @@ try {
     $EnterpriseApps = @()
 }
 
-# ── Dynamic Groups ─────────────────────────────────────────────────────────────
+# -- Dynamic Groups -------------------------------------------------------------
 Write-Host "  [19/30] Dynamic groups..." -NoNewline
 try {
     $DynamicGroups = Invoke-GraphAll `
@@ -575,9 +651,9 @@ try {
     $DynamicGroups = @()
 }
 
-# ── SharePoint Tenant Settings ────────────────────────────────────────────────
+# -- SharePoint Tenant Settings ------------------------------------------------
 # Requires: SharePointTenantSettings.Read.All (application permission).
-# If absent, the script reports 'unknown' for sharing settings — the assessment
+# If absent, the script reports 'unknown' for sharing settings - the assessment
 # and report will still complete successfully, but check 5.1 cannot be automated.
 Write-Host "  [20/30] SharePoint tenant settings..." -NoNewline
 try {
@@ -587,7 +663,7 @@ try {
     Write-Host " SharingCapability=$($SPSettings.sharingCapability)" -ForegroundColor Green
 } catch {
     try {
-        # Beta fallback — same endpoint, sometimes more permissive
+        # Beta fallback - same endpoint, sometimes more permissive
         $SPSettings = Invoke-RestMethod `
             -Uri "https://graph.microsoft.com/beta/admin/sharepoint/settings" `
             -Headers $GraphHeaders
@@ -595,7 +671,7 @@ try {
     } catch {
         $errMsg = $_.Exception.Message
         if ($errMsg -match '403|Forbidden') {
-            Write-Host " SKIPPED (403 Forbidden — grant SharePointTenantSettings.Read.All to retrieve)" -ForegroundColor Yellow
+            Write-Host " SKIPPED (403 Forbidden - grant SharePointTenantSettings.Read.All to retrieve)" -ForegroundColor Yellow
         } else {
             Write-Host " SKIPPED ($errMsg)" -ForegroundColor Yellow
         }
@@ -607,8 +683,8 @@ try {
     }
 }
 
-# ── SharePoint Sites ─────────────────────────────────────────────────────────
-# NOTE: `/sites?search=*` does NOT return every site in the tenant — it only
+# -- SharePoint Sites ---------------------------------------------------------
+# NOTE: `/sites?search=*` does NOT return every site in the tenant - it only
 # returns sites the search index can match and silently omits many (this is why
 # earlier runs "couldn't retrieve all SharePoint sites"). The dedicated
 # enumeration endpoint `/sites/getAllSites` (beta) returns the COMPLETE list.
@@ -651,7 +727,7 @@ if ($SPSites.Count -gt 0) {
     Write-Host " $($SPSites.Count) (via $spMethod)" -ForegroundColor Green
 }
 
-# ── Defender Secure Score Controls ────────────────────────────────────────────
+# -- Defender Secure Score Controls --------------------------------------------
 Write-Host "  [22/30] Secure score control profiles..." -NoNewline
 try {
     $SecureScoreControls = Invoke-GraphAll `
@@ -669,7 +745,7 @@ foreach ($c in $SecureScoreControls) {
     if ($cn -and $cn.Value) { $ControlMap[$cn.Value] = $c }
 }
 
-# ── PIM (Privileged Identity Management) ─────────────────────────────────────
+# -- PIM (Privileged Identity Management) -------------------------------------
 Write-Host "  [23/30] PIM role assignments (eligible)..." -NoNewline
 try {
     $PimEligible = Invoke-GraphAll `
@@ -681,25 +757,65 @@ try {
     $PimEligible = @()
 }
 
-# ── Defender MDE Devices ──────────────────────────────────────────────────────
+# -- Defender MDE Devices ------------------------------------------------------
 Write-Host "  [24/30] Defender for Endpoint machines..." -NoNewline
 $MdeDevices       = @()   # Requires Defender API (separate token scope); skipped here
 $DefenderEnrolled = @($IntuneDevices | Where-Object { $_.managedDeviceOwnerType -ne $null })
 Write-Host " Using Intune proxy ($($DefenderEnrolled.Count) Windows devices)" -ForegroundColor Green
 
-# ── Mailboxes (Exchange) ──────────────────────────────────────────────────────
+# -- Licensing / Subscribed SKUs ----------------------------------------------
+# Ported from the Essential-tier script (website/free-assessment-scripts) -
+# this data was never collected here at all, not gated by any permission or
+# licensing issue. New-M365Report.ps1's Licensing/Authentication Methods
+# pages are shared/tier-agnostic and expect these fields; without them they
+# rendered a misleading "permission missing" message on every Advanced-tier
+# report, even with every permission correctly granted. Confirmed live.
+Write-Host "  [+] Licensing (subscribed SKUs)..." -NoNewline
+$SubscribedSkus = @()
+try {
+    # subscribedSkus does not support $top - passing it causes an
+    # unconditional 400 Bad Request regardless of tenant size or
+    # permissions. Confirmed live: with $top=999 this always failed;
+    # without it, the call succeeds (this endpoint is never large enough
+    # to need paging - it's one row per purchased licence SKU).
+    $SubscribedSkus = Invoke-GraphAll `
+        -Uri "https://graph.microsoft.com/v1.0/subscribedSkus" `
+        -Headers $GraphHeaders
+    Write-Host " $($SubscribedSkus.Count) SKU(s)" -ForegroundColor Green
+} catch {
+    Write-Host " SKIPPED ($($_.Exception.Message))" -ForegroundColor Yellow
+}
+
+# -- Authentication Methods Policy --------------------------------------------
+Write-Host "  [+] Authentication methods policy..." -NoNewline
+$AuthMethodsPolicy = $null
+try {
+    $AuthMethodsPolicy = Invoke-RestMethod `
+        -Uri "https://graph.microsoft.com/v1.0/policies/authenticationMethodsPolicy" `
+        -Headers $GraphHeaders -ErrorAction Stop
+    Write-Host " OK" -ForegroundColor Green
+} catch {
+    Write-Host " SKIPPED ($($_.Exception.Message))" -ForegroundColor Yellow
+}
+
+# -- Mailboxes (Exchange) ------------------------------------------------------
 if (-not $SkipExchange) {
     Write-Host "  [25/30] Mailboxes (Exchange Online)..." -NoNewline
-    $Mailboxes = Get-Mailbox -ResultSize Unlimited -Filter { RecipientTypeDetails -ne 'SharedMailbox' }
+    $Mailboxes = @(Get-Mailbox -ResultSize Unlimited -Filter { RecipientTypeDetails -ne 'SharedMailbox' })
     Write-Host " $($Mailboxes.Count)" -ForegroundColor Green
 
-    # ── Transport Rules ──────────────────────────────────────────────────────
+    # -- Transport Rules ------------------------------------------------------
     Write-Host "  [26/30] Transport rules..." -NoNewline
-    $TransportRules = Get-TransportRule
+    # @() wrap required: Get-TransportRule returns raw $null (not an empty
+    # array) on a tenant with zero rules, and Set-StrictMode -Version Latest
+    # (see top of script) throws "property 'Count' cannot be found" on
+    # $null.Count - confirmed live against a real tenant with no transport
+    # rules, which killed the entire assessment run at this step.
+    $TransportRules = @(Get-TransportRule)
     Write-Host " $($TransportRules.Count)" -ForegroundColor Green
 
-    # ── Inbox Rules ─────────────────────────────────────────────────────────
-    # Sampling only — one Get-InboxRule call per mailbox takes 2-4 s each.
+    # -- Inbox Rules ---------------------------------------------------------
+    # Sampling only - one Get-InboxRule call per mailbox takes 2-4 s each.
     # Default sample of 50 keeps this step under ~3 minutes.
     # Raise $InboxRuleSample at the top of the script if you want broader coverage.
     $InboxRuleSample = 5
@@ -721,18 +837,21 @@ if (-not $SkipExchange) {
     }
     Write-Host " $($InboxRules.Count) rules (sampled $InboxRuleSample mailboxes)" -ForegroundColor Green
 
-    # ── Anti-Phishing ────────────────────────────────────────────────────────
+    # -- Anti-Phishing --------------------------------------------------------
     Write-Host "  [28/30] Anti-phishing policies..." -NoNewline
-    $AntiPhishPolicies = Get-AntiPhishPolicy
+    $AntiPhishPolicies = @(Get-AntiPhishPolicy)
     Write-Host " $($AntiPhishPolicies.Count)" -ForegroundColor Green
 
-    # ── Safe Links / Safe Attachments ────────────────────────────────────────
+    # -- Safe Links / Safe Attachments ----------------------------------------
     Write-Host "  [29/30] Safe Links / Safe Attachments..." -NoNewline
-    $SafeLinksPolicies      = Get-SafeLinksPolicy
-    $SafeAttachmentPolicies = Get-SafeAttachmentPolicy
+    # Same $null.Count-under-StrictMode risk as Transport Rules above - a
+    # tenant without Defender for Office 365 add-on licensing has zero
+    # custom Safe Links/Safe Attachment policies by default.
+    $SafeLinksPolicies      = @(Get-SafeLinksPolicy)
+    $SafeAttachmentPolicies = @(Get-SafeAttachmentPolicy)
     Write-Host " SafeLinks=$($SafeLinksPolicies.Count) SafeAtt=$($SafeAttachmentPolicies.Count)" -ForegroundColor Green
 
-    # ── DKIM signing configuration (for Email Health report page) ─────────────
+    # -- DKIM signing configuration (for Email Health report page) -------------
     Write-Host "  [+] DKIM signing configuration..." -NoNewline
     try {
         $DkimConfigs = @(Get-DkimSigningConfig -ErrorAction Stop)
@@ -742,7 +861,7 @@ if (-not $SkipExchange) {
         $DkimConfigs = @()
     }
 
-    # ── Mail flow statistics – last 30 days (for Email Health report page) ─────
+    # -- Mail flow statistics - last 30 days (for Email Health report page) -----
     Write-Host "  [+] Mail flow statistics (30 days)..." -NoNewline
     try {
         $mfStart  = (Get-Date).AddDays(-30)
@@ -754,7 +873,7 @@ if (-not $SkipExchange) {
         $mfReport = @()
     }
 
-    # ── Teams tenant settings (via Graph) ────────────────────────────────────
+    # -- Teams tenant settings (via Graph) ------------------------------------
     Write-Host "  [30/30] Teams tenant policies (Graph)..." -NoNewline
 }
 
@@ -763,20 +882,20 @@ try {
     $TeamsMeetingPolicy = Invoke-RestMethod `
         -Uri "https://graph.microsoft.com/v1.0/teamwork/teamsAppSettings" `
         -Headers $GraphHeaders -ErrorAction Stop
-} catch { <# endpoint requires delegated auth – skip silently #> }
+} catch { <# endpoint requires delegated auth - skip silently #> }
 
 $TeamsMeetingConfig = $null
 try {
     $TeamsMeetingConfig = Invoke-RestMethod `
         -Uri "https://graph.microsoft.com/beta/communications/callSettings" `
         -Headers $GraphHeaders -ErrorAction Stop
-} catch { <# endpoint requires delegated auth – skip silently #> }
+} catch { <# endpoint requires delegated auth - skip silently #> }
 Write-Host " OK" -ForegroundColor Green
 
 #endregion
 
-#region ── SECTION 1: Entra ID ───────────────────────────────────────────────
-Write-Section "1 – Entra ID"
+#region -- SECTION 1: Entra ID -----------------------------------------------
+Write-Section "1 - Entra ID"
 
 # Helper: find CA policies matching a predicate
 function Find-CaPolicy {
@@ -784,7 +903,7 @@ function Find-CaPolicy {
     $CAPolicies | Where-Object { $_.state -eq 'enabled' } | Where-Object $Filter
 }
 
-# ─ 1.1 MFA enforced for ALL users ────────────────────────────────────────────
+# - 1.1 MFA enforced for ALL users --------------------------------------------
 $mfaAllPolicy = Find-CaPolicy {
     (Get-Prop $_ 'grantControls.builtInControls') -contains 'mfa' -and
     (Get-Prop $_ 'conditions.users.includeUsers')  -contains 'All'
@@ -812,7 +931,7 @@ Write-Check "1.1 MFA for all users"       $status_1_1a
 Write-Check "1.1 MFA for Azure Mgmt"      $status_1_1b
 Write-Check "1.1 MFA enrollment coverage" $status_1_1c "$noMfaCount users without MFA"
 
-# ─ 1.2 MFA required for Admins ────────────────────────────────────────────────
+# - 1.2 MFA required for Admins ------------------------------------------------
 $mfaAdminPolicy = Find-CaPolicy {
     @(Get-Prop $_ 'conditions.users.includeRoles').Count -gt 0 -and
     (Get-Prop $_ 'grantControls.builtInControls') -contains 'mfa'
@@ -822,7 +941,7 @@ Add-Result '1-EntraID' '1.2' 'MFA is enforced on accounts with highly privileged
     $(if ($mfaAdminPolicy) {'Conditional Access Policy found that is enforcing MFA for admins.'} else {'No admin MFA CA policy found.'})
 Write-Check "1.2 MFA required for Admins" $status_1_2
 
-# ─ 1.3 Legacy Authentication blocked ──────────────────────────────────────────
+# - 1.3 Legacy Authentication blocked ------------------------------------------
 $legacyBlock = Find-CaPolicy {
     $c = Get-Prop $_ 'conditions.clientAppTypes'
     ($c -contains 'exchangeActiveSync' -or $c -contains 'other') -and
@@ -833,39 +952,50 @@ Add-Result '1-EntraID' '1.3' 'Legacy Authentication shall be blocked' $status_1_
     $(if ($legacyBlock) {'Legacy auth block policy found.'} else {'No conditional access policy found'})
 Write-Check "1.3 Legacy Authentication blocked" $status_1_3
 
-# ─ 1.4 Break Glass accounts (MANUAL) ──────────────────────────────────────────
-Add-Result '1-EntraID' '1.4' 'Break Glass users are created for emergency access' 'MANUAL' 'high' 'Manual.'
+# - 1.4 Break Glass accounts (MANUAL) ------------------------------------------
+# There's no reliable way to identify which accounts ARE break-glass from
+# Graph data alone (no directory flag for this), so this stays MANUAL - but
+# now surfaces the actual CA exclusion list instead of a bare "Manual."
+# placeholder, giving the reviewer something concrete to check against.
+$excludedUserIds = @($CAPolicies | ForEach-Object { @(Get-Prop $_ 'conditions.users.excludeUsers') } |
+    Where-Object { $_ -and $_ -ne 'GuestsOrExternalUsers' } | Select-Object -Unique)
+$breakGlassDetail = if ($excludedUserIds.Count -gt 0) {
+    "$($excludedUserIds.Count) user(s) are excluded from one or more Conditional Access policies - confirm these are your break-glass/emergency-access accounts, and that they're excluded from every CA policy, not just some."
+} else {
+    "No users are excluded from any Conditional Access policy. If you don't have dedicated break-glass accounts intentionally excluded, a CA misconfiguration or outage could lock out every administrator at once."
+}
+Add-Result '1-EntraID' '1.4' 'Break Glass users are created for emergency access' 'MANUAL' 'high' $breakGlassDetail
 Write-Check "1.4 Break Glass accounts" 'MANUAL'
 
-# ─ 1.5 Global Admins 2-4 ──────────────────────────────────────────────────────
+# - 1.5 Global Admins 2-4 ------------------------------------------------------
 $gaCount    = $GlobalAdmins.Count
 $status_1_5 = if ($gaCount -ge 2 -and $gaCount -le 4) {'PASS'} else {'FAIL'}
 Add-Result '1-EntraID' '1.5' 'Ensure that between two and four global admins are designated' $status_1_5 'high' `
     "$gaCount Global admin$(if ($gaCount -ne 1) {'s'}) were detected."
 Write-Check "1.5 Global Admin count (2-4)" $status_1_5 "Current: $gaCount"
 
-# ─ 1.6 Global Admins cloud-only ───────────────────────────────────────────────
+# - 1.6 Global Admins cloud-only -----------------------------------------------
 $syncedAdmins  = @($GlobalAdmins | Where-Object { $_.onPremisesSyncEnabled -eq $true })
 $status_1_6    = if ($syncedAdmins.Count -eq 0) {'PASS'} else {'FAIL'}
 Add-Result '1-EntraID' '1.6' 'Ensure Administrative accounts are cloud-only' $status_1_6 'high' `
     $(if ($status_1_6 -eq 'PASS') {'All Global Admins are cloud-only.'} else {"$($syncedAdmins.Count) synced Global Admin(s) found."})
 Write-Check "1.6 Global Admins cloud-only" $status_1_6
 
-# ─ 1.7 User consent / 3rd party app registration ─────────────────────────────
+# - 1.7 User consent / 3rd party app registration -----------------------------
 $userConsentOk = (Get-Prop $AuthPolicy 'defaultUserRolePermissions.allowedToCreateApps') -eq $false
 $status_1_7a   = if ($userConsentOk) {'PASS'} else {'FAIL'}
 Add-Result '1-EntraID' '1.7' 'Only Admins shall be allowed to register 3rd party applications' $status_1_7a 'high' `
-    $(if ($userConsentOk) {'Authorization Policy configured correctly.'} else {'Authorization Policy – users can register apps.'})
+    $(if ($userConsentOk) {'Authorization Policy configured correctly.'} else {'Authorization Policy - users can register apps.'})
 
 $pgpa        = @(Get-Prop $AuthPolicy 'permissionGrantPoliciesAssigned')
 $status_1_7b = if ($pgpa.Count -eq 0 -or $pgpa -notcontains 'ManagePermissionGrantsForSelf.microsoft-user-default-legacy-v2') {'PASS'} else {'FAIL'}
 Add-Result '1-EntraID' '1.7' 'Non-admin users shall be prevented from providing consent to 3rd party applications' $status_1_7b 'medium' `
-    $(if ($status_1_7b -eq 'PASS') {'Authorization Policy configured correctly.'} else {'Authorization Policy – user consent not blocked.'})
+    $(if ($status_1_7b -eq 'PASS') {'Authorization Policy configured correctly.'} else {'Authorization Policy - user consent not blocked.'})
 
 Write-Check "1.7 App registration (admins only)" $status_1_7a
 Write-Check "1.7 User consent blocked"            $status_1_7b
 
-# ─ 1.8 Guest user restricted access ──────────────────────────────────────────
+# - 1.8 Guest user restricted access ------------------------------------------
 $guestRestricted = $AuthPolicy.guestUserRoleId -in @(
     '2af84b1e-32c8-42b7-82bc-daa82404023b',  # Restricted Guest
     '10dae51f-b6af-4016-8d66-8c2a99b929b3'   # Guest
@@ -875,7 +1005,7 @@ Add-Result '1-EntraID' '1.8' 'Guest users have limited access to properties and 
     $(if ($status_1_8 -eq 'PASS') {'Guest users have limited access to directory objects.'} else {'Guest access is not restricted.'})
 Write-Check "1.8 Guest restricted access" $status_1_8
 
-# ─ 1.9 Passwords do not expire ────────────────────────────────────────────────
+# - 1.9 Passwords do not expire ------------------------------------------------
 $expiringDomains = @($Domains | Where-Object {
     $pvp = $_.PSObject.Properties['passwordValidityPeriodInDays']
     $pvp -and $pvp.Value -and $pvp.Value -ne 2147483647
@@ -885,7 +1015,7 @@ Add-Result '1-EntraID' '1.9' 'Passwords shall not expire' $status_1_9 'medium' `
     $(if ($status_1_9 -eq 'PASS') {'Passwords are set to never expire.'} else {'Passwords expire.'})
 Write-Check "1.9 Passwords do not expire" $status_1_9
 
-# ─ 1.10 MFA required to enroll devices ────────────────────────────────────────
+# - 1.10 MFA required to enroll devices ----------------------------------------
 $mfaDeviceEnroll = Find-CaPolicy {
     (Get-Prop $_ 'conditions.applications.includeUserActions') -contains 'urn:user:registersecurityinfo' -and
     (Get-Prop $_ 'grantControls.builtInControls') -contains 'mfa'
@@ -895,7 +1025,7 @@ Add-Result '1-EntraID' '1.10' 'MFA shall be required to enroll devices to Entra 
     $(if ($mfaDeviceEnroll) {'Policy found.'} else {'A conditional access policy is either missing or misconfigured.'})
 Write-Check "1.10 MFA for device enrollment" $status_1_10
 
-# ─ 1.11 Local Administrator settings for device joins ────────────────────────
+# - 1.11 Local Administrator settings for device joins ------------------------
 $deviceJoinCa = Find-CaPolicy {
     (Get-Prop $_ 'conditions.applications.includeUserActions') -contains 'urn:user:registerdevice' -and
     (Get-Prop $_ 'grantControls.builtInControls') -contains 'mfa'
@@ -905,20 +1035,20 @@ try {
     $localAdminSettings = Invoke-RestMethod `
         -Uri "https://graph.microsoft.com/v1.0/deviceManagement/deviceRegistrationPolicy" `
         -Headers $GraphHeaders -ErrorAction Stop
-} catch { <# endpoint unavailable or permissions missing – treat as not configured #> }
+} catch { <# endpoint unavailable or permissions missing - treat as not configured #> }
 $status_1_11 = if ((Get-Prop $localAdminSettings 'localAdminPassword.isEnabled') -eq $true) {'PASS'} else {'FAIL'}
 Add-Result '1-EntraID' '1.11' 'Local Administrator settings are configured for device joins' $status_1_11 'medium' `
     $(if ($status_1_11 -eq 'PASS') {'Local admin password settings configured.'} else {'Local Administrator settings are not configured for device joins.'})
 Write-Check "1.11 Local Admin settings for device joins" $status_1_11
 
-# ─ 1.12 Dormant accounts disabled after 45 days ──────────────────────────────
+# - 1.12 Dormant accounts disabled after 45 days ------------------------------
 $dormantCount = $DormantUsers.Count
 $status_1_12  = if ($dormantCount -eq 0) {'PASS'} else {'FAIL'}
 Add-Result '1-EntraID' '1.12' 'Dormant accounts are disabled after 45 days' $status_1_12 'medium' `
     "$dormantCount accounts were found active that have not signed in for over $DormantDays days."
 Write-Check "1.12 Dormant accounts" $status_1_12 "$dormantCount dormant"
 
-# ─ 1.13 Browser sessions not persistent for privileged users ──────────────────
+# - 1.13 Browser sessions not persistent for privileged users ------------------
 $noPersBrowserPolicy = Find-CaPolicy {
     @(Get-Prop $_ 'conditions.users.includeRoles').Count -gt 0 -and
     (Get-Prop $_ 'sessionControls.persistentBrowser.isEnabled') -eq $true -and
@@ -929,28 +1059,28 @@ Add-Result '1-EntraID' '1.13' 'Browser Sessions shall not be persistent for priv
     $(if ($noPersBrowserPolicy) {'Policy found.'} else {'No conditional access policy found.'})
 Write-Check "1.13 Browser session persistence" $status_1_13
 
-# ─ 1.14 Stale devices deleted (30 days) ──────────────────────────────────────
+# - 1.14 Stale devices deleted (30 days) --------------------------------------
 $staleCount   = $StaleDevices.Count
 $status_1_14  = if ($staleCount -eq 0) {'PASS'} else {'FAIL'}
 Add-Result '1-EntraID' '1.14' 'Devices shall be deleted that haven''t checked in for over 45 days.' $status_1_14 'medium' `
     "$staleCount Devices have not checked in for $StaleDeviceDays+ days"
 Write-Check "1.14 Stale devices" $status_1_14 "$staleCount stale"
 
-# ─ 1.15 Enterprise apps catalogued ───────────────────────────────────────────
+# - 1.15 Enterprise apps catalogued -------------------------------------------
 $appCount   = $EnterpriseApps.Count
 $status_1_15 = if ($appCount -gt 0) {'PASS'} else {'FAIL'}
 Add-Result '1-EntraID' '1.15' 'All corporate approved applications are cataloged and periodically reviewed' $status_1_15 'low' `
     "$appCount Enterprise applications were detected."
 Write-Check "1.15 Enterprise apps catalogued" $status_1_15 "$appCount apps"
 
-# ─ 1.16 Dynamic groups ────────────────────────────────────────────────────────
+# - 1.16 Dynamic groups --------------------------------------------------------
 $dynCount   = $DynamicGroups.Count
 $status_1_16 = if ($dynCount -gt 0) {'PASS'} else {'FAIL'}
 Add-Result '1-EntraID' '1.16' 'Dynamic Groups are leveraged for automated group management' $status_1_16 'low' `
     $(if ($dynCount -gt 0) {'Dynamic Group(s) detected.'} else {'No dynamic groups found.'})
 Write-Check "1.16 Dynamic groups" $status_1_16 "$dynCount groups"
 
-# ─ 1.17 MFA for Intune Enrollment ────────────────────────────────────────────
+# - 1.17 MFA for Intune Enrollment --------------------------------------------
 $mfaIntunePolicy = Find-CaPolicy {
     (Get-Prop $_ 'conditions.applications.includeApplications') -contains 'MicrosoftIntune' -and
     (Get-Prop $_ 'grantControls.builtInControls') -contains 'mfa'
@@ -960,7 +1090,7 @@ Add-Result '1-EntraID' '1.17' 'MFA Shall be required for Intune Enrollment' $sta
     $(if ($mfaIntunePolicy) {'Policy found.'} else {'A conditional access policy is either missing or misconfigured.'})
 Write-Check "1.17 MFA for Intune enrollment" $status_1_17
 
-# ─ 1.18 Managed Devices required for sign-in ─────────────────────────────────
+# - 1.18 Managed Devices required for sign-in ---------------------------------
 $managedDevicePolicy = Find-CaPolicy {
     $gc = Get-Prop $_ 'grantControls.builtInControls'
     $gc -contains 'compliantDevice' -or $gc -contains 'domainJoinedDevice'
@@ -970,7 +1100,7 @@ Add-Result '1-EntraID' '1.18' 'Managed Devices shall be required for authenticat
     $(if ($managedDevicePolicy) {'Policy found.'} else {'No conditional access policy found.'})
 Write-Check "1.18 Managed devices for sign-in" $status_1_18
 
-# ─ 1.19 Device compliance required ───────────────────────────────────────────
+# - 1.19 Device compliance required -------------------------------------------
 $compliancePolicy = Find-CaPolicy {
     (Get-Prop $_ 'grantControls.builtInControls') -contains 'compliantDevice'
 }
@@ -979,7 +1109,7 @@ Add-Result '1-EntraID' '1.19' 'Noncompliant devices shall be blocked from access
     $(if ($compliancePolicy) {'Policy found.'} else {'No conditional access policy found or misconfigured'})
 Write-Check "1.19 Device compliance required" $status_1_19
 
-# ─ 1.20 Phishing-resistant MFA for Admins ────────────────────────────────────
+# - 1.20 Phishing-resistant MFA for Admins ------------------------------------
 $phishMfaPolicy = Find-CaPolicy {
     @(Get-Prop $_ 'conditions.users.includeRoles').Count -gt 0 -and
     ((Get-Prop $_ 'grantControls.authenticationStrength.requirementsSatisfied') -match 'mfa' -or
@@ -990,7 +1120,7 @@ Add-Result '1-EntraID' '1.20' "Ensure 'Phishing-resistant MFA strength' is requi
     $(if ($phishMfaPolicy) {'Phishing-resistant MFA policy found.'} else {'MFA used for authenticating administrators is not phishing resistant'})
 Write-Check "1.20 Phishing-resistant MFA for Admins" $status_1_20
 
-# ─ 1.21 High/medium risk sign-ins blocked ────────────────────────────────────
+# - 1.21 High/medium risk sign-ins blocked ------------------------------------
 $riskBlockPolicy = Find-CaPolicy {
     $srl = Get-Prop $_ 'conditions.signInRiskLevels'
     ($srl -contains 'high' -or $srl -contains 'medium') -and
@@ -1001,7 +1131,7 @@ Add-Result '1-EntraID' '1.21' "Ensure 'sign-in risk' is blocked for medium and h
     $(if ($riskBlockPolicy) {'Risk-based block policy found.'} else {'No conditional access policy found'})
 Write-Check "1.21 Risk-based sign-in block" $status_1_21
 
-# ─ 1.22 PIM configured ────────────────────────────────────────────────────────
+# - 1.22 PIM configured --------------------------------------------------------
 $pimConfigured = $PimEligible.Count -gt 0
 $status_1_22a  = if ($pimConfigured) {'PASS'} else {'MANUAL'}
 Add-Result '1-EntraID' '1.22' "Ensure 'Privileged Identity Management' is used to manage roles" $status_1_22a 'high' `
@@ -1010,11 +1140,11 @@ Add-Result '1-EntraID' '1.22' 'Ensure approval is required for Global Administra
 Write-Check "1.22 PIM configured"    $status_1_22a
 Write-Check "1.22 PIM GA approval"   'MANUAL'
 
-# ─ 1.23 Sentinel ingest ───────────────────────────────────────────────────────
+# - 1.23 Sentinel ingest -------------------------------------------------------
 Add-Result '1-EntraID' '1.23' 'Microsoft Sentinel shall be configured to ingest log information' 'MANUAL' 'medium' 'Manual.'
 Write-Check "1.23 Sentinel ingest" 'MANUAL'
 
-# ─ 1.24 Device code sign-in flow blocked ─────────────────────────────────────
+# - 1.24 Device code sign-in flow blocked -------------------------------------
 $deviceCodeBlock = Find-CaPolicy {
     (Get-Prop $_ 'conditions.authenticationFlows.transferMethods') -contains 'deviceCodeFlow' -and
     (Get-Prop $_ 'grantControls.builtInControls') -contains 'block'
@@ -1024,36 +1154,118 @@ Add-Result '1-EntraID' '1.24' 'Ensure the device code sign-in flow is blocked' $
     $(if ($deviceCodeBlock) {'Device code flow block policy found.'} else {'No conditional access policy found.'})
 Write-Check "1.24 Device code flow blocked" $status_1_24
 
+# - 1.25 High-risk OAuth consent grants are reviewed ----------------------------
+# Inventories what's ALREADY been consented to (delegated + application
+# permission grants), not the policy governing future consent (that's 1.7) -
+# the two are genuinely different: a tenant can have 1.7 locked down today
+# while still carrying years of legacy high-risk grants from before that
+# policy existed, or from admin consent. This is the classic illicit-
+# consent-grant attack surface (e.g. malicious "Enable editing"-style OAuth
+# phishing apps).
+$highRiskScopeNames = @(
+    'Mail.ReadWrite', 'Mail.Send', 'Mail.Read',
+    'Files.ReadWrite.All', 'Files.Read.All',
+    'Sites.ReadWrite.All', 'Sites.FullControl.All',
+    'Directory.ReadWrite.All', 'Directory.AccessAsUser.All',
+    'User.ReadWrite.All', 'Group.ReadWrite.All',
+    'Application.ReadWrite.All', 'RoleManagement.ReadWrite.Directory',
+    'full_access_as_app', 'Contacts.ReadWrite'
+)
+$riskyDelegated = @($OAuth2Grants | Where-Object {
+    $grantScopes = ("$($_.scope)" -split '\s+')
+    @($grantScopes | Where-Object { $highRiskScopeNames -contains $_ }).Count -gt 0
+})
+$riskyAppGrants = @($AppRoleGrants | Where-Object {
+    $highRiskScopeNames -contains $GraphAppRoleNames[[string]$_.appRoleId]
+})
+$totalRisky1_25 = $riskyDelegated.Count + $riskyAppGrants.Count
+$status_1_25 = if ($totalRisky1_25 -eq 0) { 'PASS' } else { 'FAIL' }
+$detail_1_25 = if ($totalRisky1_25 -eq 0) {
+    'No high-risk delegated or application permission grants found on 3rd-party applications.'
+} else {
+    "$totalRisky1_25 high-risk grant(s) found ($($riskyDelegated.Count) delegated, $($riskyAppGrants.Count) application-level) among your tenant's consented apps - review Enterprise Applications for API permissions that go beyond what each app genuinely needs."
+}
+Add-Result '1-EntraID' '1.25' 'High-risk OAuth application permission grants are reviewed' $status_1_25 'high' $detail_1_25
+Write-Check "1.25 High-risk OAuth grants" $status_1_25
+
+# - 1.26 Application registration credential hygiene ----------------------------
+$longLivedThresholdDays = 365   # CIS-style guidance: secrets/certs should be
+                                 # rotated at least annually
+$riskyCreds = New-Object System.Collections.Generic.List[object]
+foreach ($app in $AppRegistrations) {
+    foreach ($cred in (@(Get-Prop $app 'passwordCredentials') + @(Get-Prop $app 'keyCredentials'))) {
+        if (-not $cred) { continue }
+        $credStart = Get-Prop $cred 'startDateTime'
+        $credEnd   = Get-Prop $cred 'endDateTime'
+        if ($credStart -and $credEnd) {
+            $lifetimeDays = ([datetime]$credEnd - [datetime]$credStart).TotalDays
+            if ($lifetimeDays -gt $longLivedThresholdDays) {
+                [void]$riskyCreds.Add([PSCustomObject]@{ App = [string]$app.displayName; LifetimeDays = [int]$lifetimeDays })
+            }
+        }
+    }
+}
+$status_1_26 = if ($riskyCreds.Count -eq 0) { 'PASS' } else { 'FAIL' }
+$riskyAppNames1_26 = @($riskyCreds | ForEach-Object { $_.App } | Select-Object -Unique)
+$detail_1_26 = if ($riskyCreds.Count -eq 0) {
+    'No application registration secrets or certificates exceed a 12-month lifetime.'
+} else {
+    "$($riskyCreds.Count) credential(s) across $($riskyAppNames1_26.Count) app registration(s) have a lifetime over 12 months - long-lived secrets are a standing risk if ever leaked. Affected apps: $($riskyAppNames1_26 -join ', ')."
+}
+Add-Result '1-EntraID' '1.26' 'Application registration credentials are not excessively long-lived' $status_1_26 'medium' $detail_1_26
+Write-Check "1.26 App credential hygiene" $status_1_26
+
 #endregion
 
-#region ── SECTION 2: Exchange Online ────────────────────────────────────────
-Write-Section "2 – Exchange Online"
+#region -- SECTION 2: Exchange Online ----------------------------------------
+Write-Section "2 - Exchange Online"
+
+# - 2.1 SPF records -------------------------------------------------------
+# Deliberately OUTSIDE the SkipExchange gate below: this is a plain public
+# DNS lookup (Resolve-DnsName), not an Exchange Online PowerShell cmdlet -
+# it needs no certificate, no Exchange.ManageAsApp, no extra consent at all.
+# Previously withheld from the Essential tier for no real technical reason,
+# unlike 2.3-2.6 below which genuinely need Get-AntiPhishPolicy/
+# Get-ExternalInOutlook/Get-TransportRule/Get-OrganizationConfig.
+#
+# Excludes *.onmicrosoft.com - Microsoft owns that DNS zone, so neither the
+# customer nor Camelot can ever publish a record there. Without this,
+# 2.2 (DMARC) was structurally impossible to pass for ANY tenant: Microsoft
+# never publishes a DMARC record for the default onmicrosoft.com domain, so
+# it always counted as "missing" regardless of what the customer's real
+# domains had configured. Confirmed live against Camelot's own tenant
+# 2026-09-14 - cdgiq.com's DMARC record was live and correct, yet 2.2 still
+# failed on the onmicrosoft.com domain alone. Matches the same isOnMs
+# exclusion the Email Health table below already applies (reported as 'NA'
+# there, not PASS/FAIL) - this was simply never carried over to these two
+# tenant-wide pass/fail checks.
+$CheckableDomains = @($Domains | Where-Object { $_.id -notmatch '\.onmicrosoft\.com$' })
+
+$domainsNoSpf = @($CheckableDomains | Where-Object {
+    $d = $_
+    try { -not (Resolve-DnsName -Name $d.id -Type TXT -ErrorAction Stop |
+          Where-Object { $_.Text -match 'v=spf1' }) } catch { $true }
+})
+$status_2_1 = if ($domainsNoSpf.Count -eq 0) {'PASS'} else {'FAIL'}
+Add-Result '2-Exchange' '2.1' 'SPF records shall be configured for all domains' $status_2_1 'high' `
+    $(if ($status_2_1 -eq 'PASS') {'SPF records present on all domains.'} else {"$($domainsNoSpf.Count) domain(s) missing SPF."})
+Write-Check "2.1 SPF records" $status_2_1
+
+# - 2.2 DMARC records -----------------------------------------------------
+# Same reasoning as 2.1 above - pure DNS, no Exchange access needed.
+$domainsNoDmarc = @($CheckableDomains | Where-Object {
+    $d = $_
+    try { -not (Resolve-DnsName -Name "_dmarc.$($d.id)" -Type TXT -ErrorAction Stop |
+          Where-Object { $_.Text -match 'v=DMARC1' }) } catch { $true }
+})
+$status_2_2 = if ($domainsNoDmarc.Count -eq 0) {'PASS'} else {'FAIL'}
+Add-Result '2-Exchange' '2.2' 'DMARC records shall be configured for all domains' $status_2_2 'high' `
+    $(if ($status_2_2 -eq 'PASS') {'DMARC records present.'} else {"$($domainsNoDmarc.Count) domain(s) missing DMARC."})
+Write-Check "2.2 DMARC records" $status_2_2
 
 if (-not $SkipExchange) {
 
-    # ─ 2.1 SPF records ───────────────────────────────────────────────────────
-    $domainsNoSpf = @($Domains | Where-Object {
-        $d = $_
-        try { -not (Resolve-DnsName -Name $d.id -Type TXT -ErrorAction Stop |
-              Where-Object { $_.Text -match 'v=spf1' }) } catch { $true }
-    })
-    $status_2_1 = if ($domainsNoSpf.Count -eq 0) {'PASS'} else {'FAIL'}
-    Add-Result '2-Exchange' '2.1' 'SPF records shall be configured for all domains' $status_2_1 'high' `
-        $(if ($status_2_1 -eq 'PASS') {'SPF records present on all domains.'} else {"$($domainsNoSpf.Count) domain(s) missing SPF."})
-    Write-Check "2.1 SPF records" $status_2_1
-
-    # ─ 2.2 DMARC records ─────────────────────────────────────────────────────
-    $domainsNoDmarc = @($Domains | Where-Object {
-        $d = $_
-        try { -not (Resolve-DnsName -Name "_dmarc.$($d.id)" -Type TXT -ErrorAction Stop |
-              Where-Object { $_.Text -match 'v=DMARC1' }) } catch { $true }
-    })
-    $status_2_2 = if ($domainsNoDmarc.Count -eq 0) {'PASS'} else {'FAIL'}
-    Add-Result '2-Exchange' '2.2' 'DMARC records shall be configured for all domains' $status_2_2 'high' `
-        $(if ($status_2_2 -eq 'PASS') {'DMARC records present.'} else {"$($domainsNoDmarc.Count) domain(s) missing DMARC."})
-    Write-Check "2.2 DMARC records" $status_2_2
-
-    # ─ 2.3 Anti-phishing (impersonation protection) ───────────────────────────
+    # - 2.3 Anti-phishing (impersonation protection) ---------------------------
     $defaultAntiPhish     = @($AntiPhishPolicies | Where-Object { $_.IsDefault })
     $hasImpersonationProt = @($AntiPhishPolicies | Where-Object {
         $_.EnableTargetedUserProtection -eq $true -or
@@ -1064,7 +1276,7 @@ if (-not $SkipExchange) {
         $(if ($status_2_3 -eq 'PASS') {'Impersonation protection configured.'} else {'No anti-phishing impersonation policy found.'})
     Write-Check "2.3 Anti-phishing impersonation protection" $status_2_3
 
-    # ─ 2.4 External email warning ────────────────────────────────────────────
+    # - 2.4 External email warning --------------------------------------------
     $externalTag = $null
     try { $externalTag = Get-ExternalInOutlook -ErrorAction Stop } catch {}
     $status_2_4  = if ($externalTag -and (Get-Prop $externalTag 'Enabled') -eq $true) {'PASS'} else {'FAIL'}
@@ -1072,8 +1284,8 @@ if (-not $SkipExchange) {
         $(if ($status_2_4 -eq 'PASS') {'External sender tagging is enabled.'} else {'External sender tagging is disabled.'})
     Write-Check "2.4 External email warning" $status_2_4
 
-    # ─ 2.5 Suspicious forwarding rules ───────────────────────────────────────
-    # Use PSObject.Properties to safely test each property — StrictMode throws on missing properties
+    # - 2.5 Suspicious forwarding rules ---------------------------------------
+    # Use PSObject.Properties to safely test each property - StrictMode throws on missing properties
     $forwardRules = @($TransportRules | Where-Object {
         $_ -ne $null -and
         ((Get-Prop $_ 'RedirectMessageTo') -or (Get-Prop $_ 'BlindCopyTo'))
@@ -1086,7 +1298,7 @@ if (-not $SkipExchange) {
         "Transport rules with forwarding: $($forwardRules.Count). Inbox forwarding rules: $($forwardInbox.Count)."
     Write-Check "2.5 Forwarding rules review" 'MANUAL' "$($forwardRules.Count) transport + $($forwardInbox.Count) inbox forward rules"
 
-    # ─ 2.6 Audit logging enabled ─────────────────────────────────────────────
+    # - 2.6 Audit logging enabled ---------------------------------------------
     $orgConfig    = $null
     try { $orgConfig = Get-OrganizationConfig -ErrorAction Stop } catch {}
     $auditEnabled = $orgConfig -and (Get-Prop $orgConfig 'AuditDisabled') -eq $false
@@ -1104,23 +1316,23 @@ if (-not $SkipExchange) {
 
 #endregion
 
-#region ── SECTION 3: Teams ──────────────────────────────────────────────────
-Write-Section "3 – Microsoft Teams"
+#region -- SECTION 3: Teams --------------------------------------------------
+Write-Section "3 - Microsoft Teams"
 
-# ─ Teams settings via Graph ───────────────────────────────────────────────────
+# - Teams settings via Graph ---------------------------------------------------
 $TeamsSettings = $null
 try {
     $TeamsSettings = Invoke-RestMethod `
         -Uri "https://graph.microsoft.com/v1.0/teamwork" `
         -Headers $GraphHeaders -ErrorAction Stop
-} catch { <# endpoint requires delegated auth – skip silently #> }
+} catch { <# endpoint requires delegated auth - skip silently #> }
 
 $TeamsFederationSettings = $null
 try {
     $TeamsFederationSettings = Invoke-RestMethod `
         -Uri "https://graph.microsoft.com/v1.0/teamwork/teamsAppSettings" `
         -Headers $GraphHeaders -ErrorAction Stop
-} catch { <# endpoint requires delegated auth – skip silently #> }
+} catch { <# endpoint requires delegated auth - skip silently #> }
 
 # Teams messaging and meeting policies require PowerShell if Teams module is available
 $HasTeamsModule = [bool](Get-Module MicrosoftTeams -ListAvailable)
@@ -1135,17 +1347,34 @@ if ($HasTeamsModule) {
     } catch { $HasTeamsModule = $false }
 }
 
-# ─ 3.1 External user access restricted ───────────────────────────────────────
+# - 3.1 External user access restricted ---------------------------------------
+# AllowedDomains is not a domain list to count - per Microsoft's own docs
+# (Set-CsTenantFederationConfiguration), it's either the literal string
+# 'AllowAllKnownDomains' (federate with anyone not explicitly blocked - the
+# LEAST restrictive setting) or an actual list of specifically allowed
+# domains (restricted). BlockedDomains only has any effect in the former
+# mode. Confirmed live: a default/unconfigured tenant returns the string
+# 'AllowAllKnownDomains', which the old .Count-based check (any non-empty
+# value wrapped in @() has Count -ge 1) wrongly scored as PASS - the exact
+# opposite of the real posture. AllowFederatedUsers = $false is the fully-
+# blocked case and is the most restrictive outcome regardless of the rest.
 if ($HasTeamsModule) {
-    $extDomainsRestricted = $TeamsTenantConfig.AllowedDomains.Count -gt 0 -or
-                            $TeamsTenantConfig.BlockedDomains.Count -gt 0
+    $allowFederated = Get-Prop $TeamsTenantConfig 'AllowFederatedUsers'
+    $allowedDomains = Get-Prop $TeamsTenantConfig 'AllowedDomains'
+    if ($allowFederated -eq $false) {
+        $extDomainsRestricted = $true
+    } elseif ("$allowedDomains" -eq 'AllowAllKnownDomains') {
+        $extDomainsRestricted = $false
+    } else {
+        $extDomainsRestricted = $true
+    }
     $status_3_1 = if ($extDomainsRestricted) {'PASS'} else {'FAIL'}
 } else { $status_3_1 = 'MANUAL' }
 Add-Result '3-Teams' '3.1' 'Ensure external domains are restricted in the Teams admin center' $status_3_1 'medium' `
-    $(if ($status_3_1 -eq 'PASS') {'Teams policy configured.'} else {'Manual review required or Teams module not available.'})
+    $(if ($status_3_1 -eq 'PASS') {'Teams policy configured.'} else {'Federation is set to allow all known domains rather than a specific allow-list, or manual review required.'})
 Write-Check "3.1 External user access" $status_3_1
 
-# ─ 3.2 External participants cannot request screen control ────────────────────
+# - 3.2 External participants cannot request screen control --------------------
 if ($HasTeamsModule) {
     $extControl  = $TeamsMeetingPolicyDefault.AllowExternalParticipantGiveRequestControl
     $status_3_2  = if ($extControl -eq $false) {'PASS'} else {'FAIL'}
@@ -1154,7 +1383,7 @@ Add-Result '3-Teams' '3.2' "Ensure external participants can't give or request c
     $(if ($status_3_2 -eq 'PASS') {'Teams Policy configured accurately.'} else {'External screen control is enabled or manual review required.'})
 Write-Check "3.2 External screen control" $status_3_2
 
-# ─ 3.3 Anonymous users cannot start meetings ──────────────────────────────────
+# - 3.3 Anonymous users cannot start meetings ----------------------------------
 if ($HasTeamsModule) {
     $anonStart  = $TeamsMeetingPolicyDefault.AllowAnonymousUsersToStartMeeting
     $status_3_3 = if ($anonStart -eq $false) {'PASS'} else {'FAIL'}
@@ -1163,7 +1392,7 @@ Add-Result '3-Teams' '3.3' "Ensure anonymous users and dial-in callers can't sta
     $(if ($status_3_3 -eq 'PASS') {'Teams Policy configured accurately.'} else {'Anonymous meeting start is enabled.'})
 Write-Check "3.3 Anonymous meeting start" $status_3_3
 
-# ─ 3.4 Lobby bypass restricted ────────────────────────────────────────────────
+# - 3.4 Lobby bypass restricted ------------------------------------------------
 if ($HasTeamsModule) {
     $lobbyBypass = $TeamsMeetingPolicyDefault.AutoAdmittedUsers
     $status_3_4  = if ($lobbyBypass -in @('OrganizerOnly','InvitedUsers','OrgOnly')) {'PASS'} else {'FAIL'}
@@ -1172,7 +1401,7 @@ Add-Result '3-Teams' '3.4' 'Ensure only people in my org can bypass the lobby' $
     $(if ($status_3_4 -eq 'PASS') {'Teams Policy configured accurately.'} else {'Teams Policy misconfigured.'})
 Write-Check "3.4 Lobby bypass" $status_3_4
 
-# ─ 3.5 Unmanaged users cannot initiate contact ────────────────────────────────
+# - 3.5 Unmanaged users cannot initiate contact --------------------------------
 if ($HasTeamsModule) {
     $unmanagedContact = $TeamsTenantConfig.AllowTeamsConsumer
     $status_3_5       = if ($unmanagedContact -eq $false) {'PASS'} else {'FAIL'}
@@ -1181,16 +1410,21 @@ Add-Result '3-Teams' '3.5' 'Unmanaged users SHALL NOT be enabled to initiate con
     $(if ($status_3_5 -eq 'PASS') {'Teams Policy configured accurately.'} else {'Teams Policy misconfigured.'})
 Write-Check "3.5 Unmanaged user contact" $status_3_5
 
-# ─ 3.6 Skype communication blocked ────────────────────────────────────────────
+# - 3.6 Skype communication blocked --------------------------------------------
 if ($HasTeamsModule) {
-    $skypeComm  = $TeamsTenantConfig.AllowPublicUsers
-    $status_3_6 = if ($skypeComm -eq $false) {'PASS'} else {'FAIL'}
+    # AllowPublicUsers was removed from Get-CsTenantFederationConfiguration's
+    # schema after Microsoft retired Skype consumer interop - confirmed live
+    # against a real tenant (the property is genuinely absent, not $null).
+    # Get-Prop is safe against StrictMode's throw-on-missing-property; report
+    # MANUAL rather than fabricate PASS/FAIL from data that no longer exists.
+    $skypeComm = Get-Prop $TeamsTenantConfig 'AllowPublicUsers'
+    $status_3_6 = if ($null -eq $skypeComm) { 'MANUAL' } elseif ($skypeComm -eq $false) { 'PASS' } else { 'FAIL' }
 } else { $status_3_6 = 'MANUAL' }
 Add-Result '3-Teams' '3.6' 'Ensure communication with Skype users is disabled' $status_3_6 'low' `
-    $(if ($status_3_6 -eq 'PASS') {'Teams Policy configured accurately.'} else {'Skype communication not blocked.'})
+    $(if ($status_3_6 -eq 'MANUAL' -and $HasTeamsModule) {'Skype consumer interop has been retired by Microsoft; this setting no longer applies.'} elseif ($status_3_6 -eq 'PASS') {'Teams Policy configured accurately.'} else {'Skype communication not blocked.'})
 Write-Check "3.6 Skype communication blocked" $status_3_6
 
-# ─ 3.7 3rd party file sharing blocked ────────────────────────────────────────
+# - 3.7 3rd party file sharing blocked ----------------------------------------
 if ($HasTeamsModule) {
     $thirdPartyFiles = $TeamsClientConfig.AllowDropBox -or
                        $TeamsClientConfig.AllowBox -or
@@ -1204,10 +1438,10 @@ Write-Check "3.7 3rd party file sharing" $status_3_7
 
 #endregion
 
-#region ── SECTION 4: Intune ──────────────────────────────────────────────────
-Write-Section "4 – Intune / Endpoint Management"
+#region -- SECTION 4: Intune --------------------------------------------------
+Write-Section "4 - Intune / Endpoint Management"
 
-# ─ 4.1 Windows Update Rings ──────────────────────────────────────────────────
+# - 4.1 Windows Update Rings --------------------------------------------------
 $windowsUpdateRings = $UpdateRings
 $needsPatchDevices  = @($IntuneDevices | Where-Object {
     $_.operatingSystem -eq 'Windows' -and $_.complianceState -eq 'noncompliant'
@@ -1226,17 +1460,17 @@ Add-Result '4-Intune' '4.1' 'Update Policies shall be configured for Apple Devic
     $(if ($status_4_1b -eq 'PASS') {'Apple update policy found.'} else {'No update policy found in Intune.'})
 Write-Check "4.1 Apple Update Policies" $status_4_1b
 
-# ─ 4.2 Managed devices enrolled in MDM (MANUAL) ──────────────────────────────
+# - 4.2 Managed devices enrolled in MDM (MANUAL) ------------------------------
 Add-Result '4-Intune' '4.2' 'Managed Devices are enrolled in MDM' 'MANUAL' 'medium' 'Manual'
 Write-Check "4.2 MDM enrollment" 'MANUAL'
 
-# ─ 4.3 Personal devices restricted ───────────────────────────────────────────
+# - 4.3 Personal devices restricted -------------------------------------------
 $enrollRestrictions = @()
 try {
     $enrollRestrictions = Invoke-GraphAll `
         -Uri "https://graph.microsoft.com/v1.0/deviceManagement/deviceEnrollmentConfigurations" `
         -Headers $GraphHeaders
-} catch { <# permissions missing – treat as not configured #> }
+} catch { <# permissions missing - treat as not configured #> }
 $personalRestriction = @($enrollRestrictions | Where-Object {
     $_.'@odata.type' -match 'deviceEnrollmentPlatformRestrictionConfiguration' -and
     ((Get-Prop $_ 'windowsRestriction.personalDeviceEnrollmentBlocked') -eq $true -or
@@ -1247,7 +1481,7 @@ Add-Result '4-Intune' '4.3' 'Personal Devices should be restricted from enrollin
     $(if ($status_4_3 -eq 'PASS') {'Personal device restriction policy found.'} else {'Personal devices are not restricted from enrolling into Intune MDM'})
 Write-Check "4.3 Personal device restriction" $status_4_3
 
-# ─ 4.4 Security Baselines ─────────────────────────────────────────────────────
+# - 4.4 Security Baselines -----------------------------------------------------
 $secBaselinePolicy = @($SecurityBaselines | Where-Object {
     $_.displayName -match 'baseline|Baseline'
 })
@@ -1256,7 +1490,7 @@ Add-Result '4-Intune' '4.4' 'Security Baselines should be configured for Windows
     $(if ($status_4_4 -eq 'PASS') {'Security Baseline policy configured in Intune.'} else {'No security baseline found.'})
 Write-Check "4.4 Security Baselines" $status_4_4
 
-# ─ 4.5 Compliance policies for all platforms ──────────────────────────────────
+# - 4.5 Compliance policies for all platforms ----------------------------------
 $osList = @('Windows','iOS','Android','macOS')
 $coveredOS = $CompliancePolicies | ForEach-Object {
     switch ($_.'@odata.type') {
@@ -1272,14 +1506,14 @@ Add-Result '4-Intune' '4.5' 'Devices compliance policies shall be configured for
     $(if ($status_4_5 -eq 'PASS') {'All platforms are covered by compliance policies.'} else {"Missing compliance policy for: $($missingOS -join ', ')"})
 Write-Check "4.5 Compliance policies all platforms" $status_4_5
 
-# ─ 4.6 Drive encryption required ─────────────────────────────────────────────
+# - 4.6 Drive encryption required ---------------------------------------------
 $notEncryptedCount = $NotEncryptedDevices.Count
 $status_4_6 = if ($notEncryptedCount -eq 0) {'PASS'} else {'FAIL'}
 Add-Result '4-Intune' '4.6' 'Encryption shall be required on all devices' $status_4_6 'high' `
     "$notEncryptedCount were found that are not encrypted."
 Write-Check "4.6 Device encryption" $status_4_6 "$notEncryptedCount unencrypted"
 
-# ─ 4.7 Lockout / password policy ─────────────────────────────────────────────
+# - 4.7 Lockout / password policy ---------------------------------------------
 $lockoutPolicy = @($CompliancePolicies | Where-Object {
     $_ -ne $null -and
     ((Get-Prop $_ 'passwordRequired') -eq $true -or (Get-Prop $_ 'passcodeRequired') -eq $true)
@@ -1289,40 +1523,40 @@ Add-Result '4-Intune' '4.7' 'Lockout screen and password settings shall be confi
     $(if ($status_4_7 -eq 'PASS') {'Password compliance policy found.'} else {'No device lockout policy configured in Intune.'})
 Write-Check "4.7 Device lockout / password" $status_4_7
 
-# ─ 4.8 App protection – mobile ───────────────────────────────────────────────
+# - 4.8 App protection - mobile -----------------------------------------------
 $hasAppProt = ($AppProtectioniOS.Count -gt 0 -or $AppProtectionAndroid.Count -gt 0)
 $status_4_8 = if ($hasAppProt) {'PASS'} else {'FAIL'}
 Add-Result '4-Intune' '4.8' 'App Protection policies should be created for mobile devices' $status_4_8 'medium' `
     $(if ($hasAppProt) {"Polices are in Intune for iOS=$($AppProtectioniOS.Count) and Android=$($AppProtectionAndroid.Count)"} else {'No app protection policies found.'})
 Write-Check "4.8 App protection policies" $status_4_8
 
-# ─ 4.9 App deployment through Intune ─────────────────────────────────────────
+# - 4.9 App deployment through Intune -----------------------------------------
 $managedApps = @()
 try {
     $managedApps = Invoke-GraphAll `
         -Uri "https://graph.microsoft.com/v1.0/deviceAppManagement/mobileApps?`$top=999&`$select=id,displayName,isAssigned" `
         -Headers $GraphHeaders
-} catch { <# permissions missing – skip #> }
+} catch { <# permissions missing - skip #> }
 $assignedApps = @($managedApps | Where-Object { $_.isAssigned -eq $true })
 $status_4_9   = if ($assignedApps.Count -gt 0) {'PASS'} else {'FAIL'}
 Add-Result '4-Intune' '4.9' 'Authorized Applications should be deployed to managed devices' $status_4_9 'medium' `
     $(if ($status_4_9 -eq 'PASS') {'Applications are being deployed through Intune'} else {'No assigned apps found in Intune.'})
 Write-Check "4.9 Intune app deployment" $status_4_9
 
-# ─ 4.10 LAPS ──────────────────────────────────────────────────────────────────
+# - 4.10 LAPS ------------------------------------------------------------------
 $lapsEnabled = $null
 try {
     $lapsEnabled = Invoke-RestMethod `
         -Uri "https://graph.microsoft.com/v1.0/deviceManagement/deviceConfigurations?`$filter=startswith(displayName,'LAPS')" `
         -Headers $GraphHeaders -ErrorAction Stop
-} catch { <# permissions or endpoint missing – skip #> }
+} catch { <# permissions or endpoint missing - skip #> }
 # Also check via windows LAPS settings endpoint
 $lapsSettings = $null
 try {
     $lapsSettings = Invoke-RestMethod `
         -Uri "https://graph.microsoft.com/beta/deviceManagement/deviceLocalCredentials" `
         -Headers $GraphHeaders -ErrorAction Stop
-} catch { <# permissions or endpoint missing – skip #> }
+} catch { <# permissions or endpoint missing - skip #> }
 $hasLaps    = ($lapsEnabled  -and @($lapsEnabled.value).Count  -gt 0) -or
               ($lapsSettings -and @($lapsSettings.value).Count -gt 0) -or
               ($LapsPolicy.Count -gt 0)
@@ -1333,10 +1567,10 @@ Write-Check "4.10 LAPS" $status_4_10
 
 #endregion
 
-#region ── SECTION 5: SharePoint & OneDrive ───────────────────────────────────
-Write-Section "5 – SharePoint & OneDrive"
+#region -- SECTION 5: SharePoint & OneDrive -----------------------------------
+Write-Section "5 - SharePoint & OneDrive"
 
-# ─ 5.1 External sharing restricted ───────────────────────────────────────────
+# - 5.1 External sharing restricted -------------------------------------------
 $sharingLevel   = $SPSettings.sharingCapability
 # Values: disabled | existingExternalUserSharingOnly | externalUserSharingOnly | externalUserAndGuestSharing
 $sharingOk      = $sharingLevel -in @('disabled','existingExternalUserSharingOnly')
@@ -1348,7 +1582,7 @@ Write-Check "5.1 SharePoint external sharing" $status_5_1a "Sharing level: $shar
 Add-Result '5-SharePoint' '5.1' 'Ensure link sharing is restricted in SharePoint and OneDrive' 'MANUAL' 'medium' 'Manual.'
 Write-Check "5.1 Link sharing restriction" 'MANUAL'
 
-# ─ 5.2 Anyone link expiration ────────────────────────────────────────────────
+# - 5.2 Anyone link expiration ------------------------------------------------
 Add-Result '5-SharePoint' '5.2' 'Expiration Date SHOULD Be Set for Anyone Links' 'MANUAL' 'low' 'Manual.'
 Write-Check "5.2 Anyone link expiration" 'MANUAL'
 
@@ -1377,14 +1611,14 @@ $SPSitesWithPublicLinks = @($SPSitesWithPublicLinks)
 
 #endregion
 
-#region ── SECTION 6: Defender ───────────────────────────────────────────────
-Write-Section "6 – Microsoft Defender"
+#region -- SECTION 6: Defender -----------------------------------------------
+Write-Section "6 - Microsoft Defender"
 
-# ─ 6.1 Security awareness training (MANUAL) ──────────────────────────────────
+# - 6.1 Security awareness training (MANUAL) ----------------------------------
 Add-Result '6-Defender' '6.1' 'Attack simulations shall be periodically conducted' 'MANUAL' 'medium' 'Manual'
 Write-Check "6.1 Security awareness training" 'MANUAL'
 
-# ─ 6.2 Defender AV via Intune ────────────────────────────────────────────────
+# - 6.2 Defender AV via Intune ------------------------------------------------
 $defenderAvPolicy = @($ConfigProfiles | Where-Object {
     $_.'@odata.type' -match 'windowsDefender|antivirus|endpointProtection'
 })
@@ -1393,7 +1627,7 @@ Add-Result '6-Defender' '6.2' 'Microsoft Defender Antivirus is deployed and mana
     $(if ($status_6_2 -eq 'PASS') {'Microsoft Defender Antivirus policy configured in Intune.'} else {'No Defender AV policy found in Intune.'})
 Write-Check "6.2 Defender AV via Intune" $status_6_2
 
-# ─ 6.3 Defender for Endpoint enrollment ──────────────────────────────────────
+# - 6.3 Defender for Endpoint enrollment --------------------------------------
 # Check via security/microsoft.graph.security.deviceInventories or use managedDevices
 $mdeEnrolledCount = @($IntuneDevices | Where-Object {
     $_.operatingSystem -eq 'Windows'
@@ -1403,7 +1637,7 @@ Add-Result '6-Defender' '6.3' 'Devices shall be enrolled for Defender for Busine
     "$mdeEnrolledCount Devices found in Defender via Intune"
 Write-Check "6.3 MDE enrollment" $status_6_3 "$mdeEnrolledCount devices"
 
-# ─ 6.4 Firewall policy ────────────────────────────────────────────────────────
+# - 6.4 Firewall policy --------------------------------------------------------
 $firewallPolicy = @($ConfigProfiles | Where-Object {
     $_.'@odata.type' -match 'windowsFirewall' -or
     $_.displayName -match 'Firewall'
@@ -1413,7 +1647,7 @@ Add-Result '6-Defender' '6.4' 'Firewall Policies are configured for Windows Devi
     $(if ($status_6_4 -eq 'PASS') {'Firewall policy found.'} else {'No Windows firewall policy found in Intune.'})
 Write-Check "6.4 Firewall policy" $status_6_4
 
-# ─ 6.5 Safe Links ────────────────────────────────────────────────────────────
+# - 6.5 Safe Links ------------------------------------------------------------
 $hasActiveSafeLinks = $false
 if (-not $SkipExchange -and $SafeLinksPolicies) {
     $hasActiveSafeLinks = (@($SafeLinksPolicies | Where-Object {
@@ -1425,7 +1659,7 @@ Add-Result '6-Defender' '6.5' 'Safe Links policies are configured' $status_6_5 '
     $(if ($status_6_5 -eq 'PASS') {'Safe Links policies are present and correctly configured.'} else {'Safe Links policy not found or Exchange module unavailable.'})
 Write-Check "6.5 Safe Links" $status_6_5
 
-# ─ 6.6 Safe Attachments ──────────────────────────────────────────────────────
+# - 6.6 Safe Attachments ------------------------------------------------------
 $hasActiveSafeAtt = $false
 if (-not $SkipExchange -and $SafeAttachmentPolicies) {
     $hasActiveSafeAtt = (@($SafeAttachmentPolicies | Where-Object {
@@ -1437,11 +1671,11 @@ Add-Result '6-Defender' '6.6' 'Safe Attachment Policies are configured' $status_
     $(if ($status_6_6 -eq 'PASS') {'Active Safe Attachment policy found'} else {'No active Safe Attachment policy.'})
 Write-Check "6.6 Safe Attachments" $status_6_6
 
-# ─ 6.7 Tamper Protection (MANUAL / Defender for Endpoint API) ────────────────
+# - 6.7 Tamper Protection (MANUAL / Defender for Endpoint API) ----------------
 Add-Result '6-Defender' '6.7' 'Turn on Tamper Protection' 'MANUAL' 'high' 'Manual'
 Write-Check "6.7 Tamper Protection" 'MANUAL'
 
-# ─ 6.8 Attack Surface Reduction rules ────────────────────────────────────────
+# - 6.8 Attack Surface Reduction rules ----------------------------------------
 $asrPolicy = @($ConfigProfiles | Where-Object {
     $_.'@odata.type' -match 'windowsDefenderAdvancedThreatProtection' -or
     $_.displayName -match 'Attack Surface|ASR'
@@ -1451,7 +1685,7 @@ Add-Result '6-Defender' '6.8' 'Attack Surface Reduction rules shall be configure
     $(if ($status_6_8 -eq 'PASS') {'Attack surface reduction policy found in Intune'} else {'No ASR policy found.'})
 Write-Check "6.8 Attack Surface Reduction" $status_6_8
 
-# ─ 6.9 Defender for Cloud Apps ────────────────────────────────────────────────
+# - 6.9 Defender for Cloud Apps ------------------------------------------------
 $defenderCloudApps = @($SecureScoreControls | Where-Object {
     $_ -ne $null -and (Get-Prop $_ 'controlName') -match 'CloudApp|MCAS'
 })
@@ -1468,14 +1702,14 @@ Write-Check "6.9 Defender for Cloud Apps" $status_6_9
 
 #endregion
 
-#region ── SECTION 7: Purview ─────────────────────────────────────────────────
-Write-Section "7 – Purview / Compliance"
+#region -- SECTION 7: Purview -------------------------------------------------
+Write-Section "7 - Purview / Compliance"
 
-# ─ 7.1 Backups (MANUAL) ──────────────────────────────────────────────────────
+# - 7.1 Backups (MANUAL) ------------------------------------------------------
 Add-Result '7-Purview' '7.1' 'Maintain 3rd party backups of Microsoft 365 data' 'MANUAL' 'medium' 'Manual'
 Write-Check "7.1 Third-party backups" 'MANUAL'
 
-# ─ 7.2 Unified Audit Log enabled ─────────────────────────────────────────────
+# - 7.2 Unified Audit Log enabled ---------------------------------------------
 $auditStatus = $null
 try {
     $auditStatus = Invoke-RestMethod `
@@ -1492,21 +1726,21 @@ if (-not $SkipExchange) {
 }
 $status_7_2 = if ($auditLogEnabled) {'PASS'} elseif ($SkipExchange) {'MANUAL'} else {'FAIL'}
 Add-Result '7-Purview' '7.2' 'Audit Logging SHALL Be Enabled' $status_7_2 'high' `
-    $(if ($auditLogEnabled) {'Audit Logging Enabled.'} else {'Audit logging check inconclusive – verify manually.'})
+    $(if ($auditLogEnabled) {'Audit Logging Enabled.'} else {'Audit logging check inconclusive - verify manually.'})
 Write-Check "7.2 Unified Audit Log" $status_7_2
 
-# ─ 7.3 Retention policies (MANUAL) ───────────────────────────────────────────
+# - 7.3 Retention policies (MANUAL) -------------------------------------------
 Add-Result '7-Purview' '7.3' 'Retention Policies shall be configured' 'MANUAL' 'medium' 'Manual'
 Write-Check "7.3 Retention policies" 'MANUAL'
 
-# ─ 7.4 Sensitivity Labels ────────────────────────────────────────────────────
+# - 7.4 Sensitivity Labels ----------------------------------------------------
 $sensitivityCtrl = $ControlMap['SensitivityLabels']
 $status_7_4 = if ($sensitivityCtrl -and (Get-Prop $sensitivityCtrl 'implementationStatus') -eq 'Implemented') {'PASS'} else {'FAIL'}
 Add-Result '7-Purview' '7.4' 'Information Protection Labels shall be configured' $status_7_4 'high' `
     $(if ($status_7_4 -eq 'PASS') {'Sensitivity labels configured.'} else {'Secure Score Controls.'})
 Write-Check "7.4 Sensitivity Labels" $status_7_4
 
-# ─ 7.5 DLP Policies ──────────────────────────────────────────────────────────
+# - 7.5 DLP Policies ----------------------------------------------------------
 $dlpCtrl = $ControlMap['DLPPolicy']
 $status_7_5 = if ($dlpCtrl -and (Get-Prop $dlpCtrl 'implementationStatus') -eq 'Implemented') {'PASS'} else {'PASS'} # Shown as PASS in report
 # Direct Graph query for DLP policies
@@ -1523,7 +1757,7 @@ Write-Check "7.5 DLP Policies" $status_7_5
 
 #endregion
 
-#region ── Summary Metrics ────────────────────────────────────────────────────
+#region -- Summary Metrics ----------------------------------------------------
 Write-Section "Assessment Summary"
 
 $Total   = $Results.Count
@@ -1553,14 +1787,14 @@ Write-Host "  Automated pass rate: $PassPct%" -ForegroundColor Cyan
 
 #endregion
 
-#region ── Export Results ─────────────────────────────────────────────────────
+#region -- Export Results -----------------------------------------------------
 Write-Section "Exporting results"
 
 $Timestamp   = Get-Date -Format 'yyyyMMdd_HHmmss'
 $JsonPath    = Join-Path $OutputFolder "Assessment_Results_$Timestamp.json"
 $SummaryPath = Join-Path $OutputFolder "Assessment_Summary_$Timestamp.csv"
 
-# ── Email Health (per-domain SPF/DKIM/DMARC + mail-flow) ─────────────────────
+# -- Email Health (per-domain SPF/DKIM/DMARC + mail-flow) ---------------------
 # Ensure Exchange-only variables exist when -SkipExchange was used
 if (-not (Get-Variable -Name DkimConfigs -Scope Script -ErrorAction SilentlyContinue) -and
     -not (Get-Variable -Name DkimConfigs -ErrorAction SilentlyContinue)) { $DkimConfigs = @() }
@@ -1575,7 +1809,7 @@ foreach ($dom in $Domains) {
     $isOnMs    = $dn -match '\.onmicrosoft\.com$'
 
     if ($isOnMs) {
-        # Microsoft routing domains – DNS records are managed by Microsoft
+        # Microsoft routing domains - DNS records are managed by Microsoft
         $spf = 'NA'; $verified = 'NA'; $dkim = 'NA'; $dmarc = 'NA'; $dmarcPolicy = ''
     } else {
         # SPF
@@ -1591,7 +1825,7 @@ foreach ($dom in $Domains) {
             if (Resolve-DnsName -Name $dn -Type MX -ErrorAction Stop) { $verified = 'PASS' }
         } catch { $verified = 'FAIL' }
 
-        # DKIM – prefer Exchange config, fall back to DNS CNAME selector1
+        # DKIM - prefer Exchange config, fall back to DNS CNAME selector1
         $dkim = 'FAIL'
         $dkimCfg = $DkimConfigs | Where-Object { (Get-Prop $_ 'Domain') -eq $dn } | Select-Object -First 1
         if ($dkimCfg -and [bool](Get-Prop $dkimCfg 'Enabled')) {
@@ -1630,7 +1864,7 @@ foreach ($dom in $Domains) {
 }
 Write-Host " $($EmailHealth.Count) domains" -ForegroundColor Green
 
-# ── Mail-flow summary (last 30 days) ─────────────────────────────────────────
+# -- Mail-flow summary (last 30 days) -----------------------------------------
 $mfScanned = 0; $mfDelivered = 0; $mfBlocked = 0
 foreach ($row in $mfReport) {
     $cnt = 0
@@ -1646,9 +1880,14 @@ $MailFlow = @{
     EmailsBlocked   = $mfBlocked
 }
 
-# ── JSON (full results) ──────────────────────────────────────────────────────
+# -- JSON (full results) ------------------------------------------------------
 $exportObj = [ordered]@{
     GeneratedAt    = (Get-Date -Format 'o')
+    # Read by New-M365Report.ps1 to select tier-accurate report copy (this
+    # is the certificate-based, Advanced-tier script - see the SYNOPSIS
+    # above). Not present in JSON generated before this field existed;
+    # the report defaults to 'Essential' when it's missing.
+    AssessmentTier = 'Advanced'
     TenantId       = $TenantId
     DefaultDomain  = $DefaultDomain
     SecureScore    = @{
@@ -1685,23 +1924,43 @@ $exportObj = [ordered]@{
     }
     EmailHealth    = $EmailHealth
     MailFlow       = $MailFlow
+    Licensing      = @($SubscribedSkus | ForEach-Object {
+        $consumed = 0; $total = 0
+        $cp = $_.PSObject.Properties['consumedUnits']; if ($cp) { $consumed = $cp.Value }
+        $pp = $_.PSObject.Properties['prepaidUnits'];  if ($pp) { $total = $pp.Value.enabled }
+        [PSCustomObject]@{
+            SkuPartNumber = [string](Get-Prop $_ 'skuPartNumber')
+            SkuId         = [string](Get-Prop $_ 'skuId')
+            DisplayName   = [string](Get-Prop $_ 'skuPartNumber')
+            Consumed      = $consumed
+            Total         = $total
+        }
+    })
+    AuthMethods    = if ($AuthMethodsPolicy) {
+        @($AuthMethodsPolicy.authenticationMethodConfigurations | ForEach-Object {
+            [PSCustomObject]@{
+                Method = [string](Get-Prop $_ 'id')
+                State  = [string](Get-Prop $_ 'state')
+            }
+        })
+    } else { @() }
     Controls       = $Results
 }
 $exportObj | ConvertTo-Json -Depth 10 | Out-File $JsonPath -Encoding UTF8
-Write-Host "  JSON  → $JsonPath" -ForegroundColor Green
+Write-Host "  JSON  -> $JsonPath" -ForegroundColor Green
 
-# ── CSV summary ──────────────────────────────────────────────────────────────
+# -- CSV summary --------------------------------------------------------------
 $Results | Export-Csv $SummaryPath -NoTypeInformation -Encoding UTF8
-Write-Host "  CSV   → $SummaryPath" -ForegroundColor Green
+Write-Host "  CSV   -> $SummaryPath" -ForegroundColor Green
 
-# ── Excel workbook (if ImportExcel module available) ─────────────────────────
+# -- Excel workbook (if ImportExcel module available) -------------------------
 if ($HasImportExcel) {
     $XlsxPath = Join-Path $OutputFolder "Assessment_Workbook_$Timestamp.xlsx"
 
-    # Tab 1 – Control Results
+    # Tab 1 - Control Results
     $Results | Export-Excel $XlsxPath -WorksheetName 'Controls' -AutoFilter -BoldTopRow -AutoSize
 
-    # Tab 2 – User list (with MFA & sign-in details)
+    # Tab 2 - User list (with MFA & sign-in details)
     $userSheet = $AllUsers | Select-Object displayName, userPrincipalName, accountEnabled, userType,
         @{N='LastSignIn'; E={
             $sia = $_.PSObject.Properties['signInActivity']
@@ -1714,24 +1973,24 @@ if ($HasImportExcel) {
         }}
     $userSheet | Export-Excel $XlsxPath -WorksheetName 'Users' -AutoFilter -BoldTopRow -AutoSize -Append
 
-    # Tab 3 – Users without MFA
+    # Tab 3 - Users without MFA
     ($MfaReg | Where-Object { -not $_.isMfaRegistered }) |
         Select-Object userPrincipalName, displayName, isMfaRegistered,
             @{N='methodsRegistered'; E={($_.methodsRegistered -join ', ')}} |
         Export-Excel $XlsxPath -WorksheetName 'UsersNoMFA' -AutoFilter -BoldTopRow -AutoSize -Append
 
-    # Tab 4 – Users with weak MFA
+    # Tab 4 - Users with weak MFA
     $WeakMfaUsers |
         Select-Object userPrincipalName, displayName,
             @{N='methodsRegistered'; E={($_.methodsRegistered -join ', ')}} |
         Export-Excel $XlsxPath -WorksheetName 'UsersWeakMFA' -AutoFilter -BoldTopRow -AutoSize -Append
 
-    # Tab 5 – Global Admins
+    # Tab 5 - Global Admins
     $GlobalAdmins |
         Select-Object displayName, userPrincipalName, onPremisesSyncEnabled |
         Export-Excel $XlsxPath -WorksheetName 'GlobalAdmins' -AutoFilter -BoldTopRow -AutoSize -Append
 
-    # Tab 6 – Dormant Users
+    # Tab 6 - Dormant Users
     $DormantUsers |
         Select-Object displayName, userPrincipalName,
             @{N='LastSignIn'; E={
@@ -1740,28 +1999,28 @@ if ($HasImportExcel) {
             }} |
         Export-Excel $XlsxPath -WorksheetName 'DormantUsers' -AutoFilter -BoldTopRow -AutoSize -Append
 
-    # Tab 7 – Risky Users
+    # Tab 7 - Risky Users
     $RiskyUsers |
         Select-Object userDisplayName, userPrincipalName, riskLevel, riskState, riskDetail |
         Export-Excel $XlsxPath -WorksheetName 'RiskyUsers' -AutoFilter -BoldTopRow -AutoSize -Append
 
-    # Tab 8 – Devices (Intune)
+    # Tab 8 - Devices (Intune)
     $IntuneDevices |
         Select-Object deviceName, operatingSystem, osVersion,
             complianceState, isEncrypted, managedDeviceOwnerType, lastSyncDateTime |
         Export-Excel $XlsxPath -WorksheetName 'Devices' -AutoFilter -BoldTopRow -AutoSize -Append
 
-    # Tab 9 – Non-Compliant Devices
+    # Tab 9 - Non-Compliant Devices
     $NonCompliantDevices |
         Select-Object deviceName, operatingSystem, osVersion, complianceState, lastSyncDateTime |
         Export-Excel $XlsxPath -WorksheetName 'NonCompliantDevices' -AutoFilter -BoldTopRow -AutoSize -Append
 
-    # Tab 10 – Devices not encrypted
+    # Tab 10 - Devices not encrypted
     $NotEncryptedDevices |
         Select-Object deviceName, operatingSystem, osVersion, isEncrypted, lastSyncDateTime |
         Export-Excel $XlsxPath -WorksheetName 'DevicesNoEncryption' -AutoFilter -BoldTopRow -AutoSize -Append
 
-    # Tab 11 – Conditional Access Policies
+    # Tab 11 - Conditional Access Policies
     $CAPolicies |
         Select-Object displayName, state,
             @{N='IncludeUsers'; E={ @(Get-Prop $_ 'conditions.users.includeUsers')  -join ',' }},
@@ -1770,12 +2029,12 @@ if ($HasImportExcel) {
             @{N='GrantControls';E={ @(Get-Prop $_ 'grantControls.builtInControls')  -join ',' }} |
         Export-Excel $XlsxPath -WorksheetName 'ConditionalAccessPolicies' -AutoFilter -BoldTopRow -AutoSize -Append
 
-    # Tab 12 – Enterprise Applications
+    # Tab 12 - Enterprise Applications
     $EnterpriseApps |
         Select-Object displayName, appId, publisherName, signInAudience |
         Export-Excel $XlsxPath -WorksheetName 'EnterpriseApps' -AutoFilter -BoldTopRow -AutoSize -Append
 
-    # Tab 13 – SharePoint Settings
+    # Tab 13 - SharePoint Settings
     [PSCustomObject]@{
         SharingCapability            = Get-Prop $SPSettings 'sharingCapability'
         DefaultSharingLinkType       = Get-Prop $SPSettings 'defaultSharingLinkType'
@@ -1783,7 +2042,7 @@ if ($HasImportExcel) {
         AllowedDomainGuidsForSyncApp = (@(Get-Prop $SPSettings 'allowedDomainGuidsForSyncApp') -join ',')
     } | Export-Excel $XlsxPath -WorksheetName 'SharePointSettings' -AutoFilter -BoldTopRow -AutoSize -Append
 
-    # Tab 13b – SharePoint Site Inventory (all discovered sites)
+    # Tab 13b - SharePoint Site Inventory (all discovered sites)
     if ($SPSites.Count -gt 0) {
         $SPSites |
             Select-Object `
@@ -1793,27 +2052,27 @@ if ($HasImportExcel) {
             Export-Excel $XlsxPath -WorksheetName 'SharePointSites' -AutoFilter -BoldTopRow -AutoSize -Append
     }
 
-    # Tab 14 – Domains
+    # Tab 14 - Domains
     $Domains |
         Select-Object id, isVerified, isDefault, authenticationType,
             passwordValidityPeriodInDays, passwordNotificationWindowInDays |
         Export-Excel $XlsxPath -WorksheetName 'Domains' -AutoFilter -BoldTopRow -AutoSize -Append
 
-    # Tab 15 – Secure Score History
+    # Tab 15 - Secure Score History
     $SecureScoreHistory |
         Select-Object createdDateTime, currentScore, maxScore,
             @{N='Percentage'; E={ [math]::Round(($_.currentScore/$_.maxScore)*100,1) }} |
         Export-Excel $XlsxPath -WorksheetName 'SecureScoreHistory' -AutoFilter -BoldTopRow -AutoSize -Append
 
-    Write-Host "  XLSX  → $XlsxPath" -ForegroundColor Green
+    Write-Host "  XLSX  -> $XlsxPath" -ForegroundColor Green
 } else {
-    Write-Host "  (ImportExcel module not available – install with: Install-Module ImportExcel)" -ForegroundColor Yellow
+    Write-Host "  (ImportExcel module not available - install with: Install-Module ImportExcel)" -ForegroundColor Yellow
     Write-Host "  CSV written instead: $SummaryPath" -ForegroundColor Yellow
 }
 
 #endregion
 
-#region ── Cleanup ────────────────────────────────────────────────────────────
+#region -- Cleanup ------------------------------------------------------------
 if (-not $SkipExchange) {
     Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
 }

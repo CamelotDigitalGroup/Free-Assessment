@@ -81,5 +81,6 @@ You'll get:
 | Exchange checks show `MANUAL — module not installed` | `Install-Module ExchangeOnlineManagement`. |
 | Workbook is CSVs, not `.xlsx` | `Install-Module ImportExcel`. |
 | No PDF, only HTML | Install Microsoft Edge or Google Chrome, then re-run the report script. |
-| `403 / insufficient privileges` on some checks | Confirm **admin consent** was granted and the app has the **Global Reader / Compliance Reader** role assigned. |
+| `403 / insufficient privileges` on some checks | Confirm **admin consent** was granted and the app has the **Global Reader / Compliance Reader** role assigned. If you just set this up, note that a newly granted permission can take several minutes to propagate - if it's a fresh app registration, wait 10-15 minutes and re-run before assuming something's misconfigured. |
+| Teams checks (section 3) are all `MANUAL` | Confirm the **Skype and Teams Tenant Admin API** permission was added and admin-consented, and that the app has the **Teams Administrator** role assigned (see [01-APP-REGISTRATION.md](01-APP-REGISTRATION.md)) - `Connect-MicrosoftTeams` fails silently without both. |
 | Some controls always `MANUAL` | A few controls require human judgement and are intentionally left for manual review. |
