@@ -1,0 +1,16 @@
+# Terraform state & local files
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+crash.log
+crash.*.log
+
+# Sensitive / local variable files
+terraform.tfvars
+*.auto.tfvars
+
+# Uploaded certificates
+*.cer
+*.pem
+*.pfx

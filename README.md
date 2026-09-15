@@ -6,7 +6,7 @@
 
 [![PowerShell](https://img.shields.io/badge/PowerShell-7.2%2B-5391FE?logo=powershell&logoColor=white)](https://learn.microsoft.com/powershell/)
 [![Microsoft 365](https://img.shields.io/badge/Microsoft%20365-Graph%20%2B%20Exchange%20Online-D83B01?logo=microsoft&logoColor=white)](https://learn.microsoft.com/graph/)
-[![Auth](https://img.shields.io/badge/Auth-Certificate%20(app--only)-1B4332)](#3-create-the-certificate)
+[![Auth](https://img.shields.io/badge/Auth-Certificate%20(app--only)-1B4332)](01-APP-REGISTRATION.md#3-create-the-certificate)
 [![Access](https://img.shields.io/badge/Access-Read--only-22c55e)](#security--privacy)
 [![License: MIT](https://img.shields.io/badge/License-MIT-D4A843)](LICENSE)
 
@@ -23,7 +23,7 @@ security domains.
 
 | Script | What it does |
 | ------ | ------------ |
-| **`M365-SecurityAssessment.ps1`** | Connects to your tenant **read-only** using certificate-based app authentication, evaluates 100+ security controls across Entra ID, Exchange, Teams, Intune, SharePoint/OneDrive, Defender and Purview, and writes a structured JSON results file plus an Excel workbook of the raw evidence. |
+| **`M365-SecurityAssessment.ps1`** | Connects to your tenant **read-only** using certificate-based app authentication, evaluates 65 security controls (71 individual checks) across Entra ID, Exchange, Teams, Intune, SharePoint/OneDrive, Defender and Purview, and writes a structured JSON results file plus an Excel workbook of the raw evidence. |
 | **`New-M365Report.ps1`** | Turns that JSON into a branded, self-contained **HTML report** and renders it to **PDF** — clear findings, severities and recommendations, ready to hand to leadership. |
 
 Everything is **read-only**. The scripts can never change, delete, move or send anything in
@@ -47,8 +47,8 @@ Each control is scored **PASS / FAIL / WARN / MANUAL** with a severity rating.
 
 ## Quick start
 
-> Full, click-by-click setup is in **[docs/01-APP-REGISTRATION.md](docs/01-APP-REGISTRATION.md)**
-> and **[docs/02-RUNNING-THE-ASSESSMENT.md](docs/02-RUNNING-THE-ASSESSMENT.md)**.
+> Full, click-by-click setup is in **[01-APP-REGISTRATION.md](01-APP-REGISTRATION.md)**
+> and **[02-RUNNING-THE-ASSESSMENT.md](02-RUNNING-THE-ASSESSMENT.md)**.
 >
 > Prefer infrastructure-as-code? The whole Entra setup (app registration, read-only
 > permissions, admin consent, certificate upload and directory role) can be provisioned
@@ -76,7 +76,7 @@ Each control is scored **PASS / FAIL / WARN / MANUAL** with a severity rating.
 | Requirement | Notes |
 | ----------- | ----- |
 | **PowerShell 7.2+** | Recommended on Windows. `pwsh` cross-platform also works for the Graph portion. |
-| **An Entra app registration** | App-only, with a certificate — set up manually via [docs/01-APP-REGISTRATION.md](docs/01-APP-REGISTRATION.md), or automatically with the [Terraform module](terraform/README.md). |
+| **An Entra app registration** | App-only, with a certificate — set up manually via [01-APP-REGISTRATION.md](01-APP-REGISTRATION.md), or automatically with the [Terraform module](terraform/README.md). |
 | **A certificate** | Self-signed is fine. Public key uploaded to the app; private key installed in your local certificate store. |
 | **`ExchangeOnlineManagement` module** | For the Exchange Online domain. If missing, Exchange checks are skipped gracefully. `Install-Module ExchangeOnlineManagement` |
 | **`ImportExcel` module** *(optional)* | For the `.xlsx` evidence workbook. If missing, raw data falls back to CSV. `Install-Module ImportExcel` |
