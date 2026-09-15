@@ -1476,15 +1476,7 @@ try {
         -Uri "https://graph.microsoft.com/v1.0/deviceManagement/deviceConfigurations?`$filter=startswith(displayName,'LAPS')" `
         -Headers $GraphHeaders -ErrorAction Stop
 } catch { <# permissions or endpoint missing - skip #> }
-# Also check via windows LAPS settings endpoint
-$lapsSettings = $null
-try {
-    $lapsSettings = Invoke-RestMethod `
-        -Uri "https://graph.microsoft.com/beta/deviceManagement/deviceLocalCredentials" `
-        -Headers $GraphHeaders -ErrorAction Stop
-} catch { <# permissions or endpoint missing - skip #> }
 $hasLaps    = ($lapsEnabled  -and @($lapsEnabled.value).Count  -gt 0) -or
-              ($lapsSettings -and @($lapsSettings.value).Count -gt 0) -or
               ($LapsPolicy.Count -gt 0)
 $status_4_10 = if ($hasLaps) {'PASS'} else {'FAIL'}
 Add-Result '4-Intune' '4.10' 'Ensure Local Administrator Password Solution is enabled' $status_4_10 'high' `
@@ -1672,15 +1664,7 @@ Write-Check "7.4 Sensitivity Labels" $status_7_4
 
 # - 7.5 DLP Policies ----------------------------------------------------------
 $dlpCtrl = $ControlMap['DLPPolicy']
-$status_7_5 = if ($dlpCtrl -and (Get-Prop $dlpCtrl 'implementationStatus') -eq 'Implemented') {'PASS'} else {'PASS'} # Shown as PASS in report
-# Direct Graph query for DLP policies
-$dlpPolicies = @()
-try {
-    $dlpPolicies = Invoke-GraphAll `
-        -Uri "https://graph.microsoft.com/v1.0/security/informationProtection/labelPolicies" `
-        -Headers $GraphHeaders
-} catch { <# endpoint may not be available with current permissions #> }
-$status_7_5 = if ($dlpCtrl -or $dlpPolicies.Count -gt 0) {'PASS'} else {'FAIL'}
+$status_7_5 = if ($dlpCtrl -and (Get-Prop $dlpCtrl 'implementationStatus') -eq 'Implemented') {'PASS'} else {'FAIL'}
 Add-Result '7-Purview' '7.5' 'Data loss prevention policies shall be configured' $status_7_5 'high' `
     $(if ($status_7_5 -eq 'PASS') {'Secure Score Controls.'} else {'No DLP policies found.'})
 Write-Check "7.5 DLP Policies" $status_7_5
