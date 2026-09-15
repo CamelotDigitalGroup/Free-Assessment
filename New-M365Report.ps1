@@ -755,7 +755,7 @@ if ($IsAdvancedTier) {
     $scopeItems = @(
         'We reviewed Entra ID (identity, MFA, conditional access, privileged roles), Exchange Online (full mailbox security, email authentication and anti-phishing), Teams (external access, meeting and messaging policies), Intune (device compliance and management), SharePoint/OneDrive (external sharing), Microsoft Defender, and Purview (retention and data loss prevention).'
         'Access was read-only, granted via a certificate-based Microsoft Entra app registration with additional Exchange Online and Microsoft Teams permissions beyond the free assessment - the same permission model Microsoft itself recommends for security reviews. No configuration was changed at any point.'
-        'The scripts that performed this assessment are open source and published on our public GitHub, so you (or your own IT team) can review exactly what was run before, during, or after granting access.'
+        "The script that performed this assessment isn't published in our public repo - we're glad to share it with you directly, before, during or after the engagement, so nothing about it is a black box."
         'This reflects a single point in time. Microsoft 365 configurations change as people, policies and licensing change, so we would expect a re-assessment some months from now to look different.'
     )
     $scopeNoteClose = 'If any of these matter to you, let us know and we can scope them as part of this engagement - see the closing page for how to reach us.'

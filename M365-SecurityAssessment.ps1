@@ -50,10 +50,16 @@
         RoleManagement.Read.Directory  role assignments (PIM check)
         IdentityRiskyUser.Read.All     risky user list
         SecurityActions.Read.All       Defender for Cloud Apps
-    Exchange Online (app-only):
-        Exchange.ManageAsApp           Search-UnifiedAuditLog; Get-*
-    Entra role:
-        Global Reader  OR  Compliance Reader (for UAL / Purview checks)
+
+    That's the complete list. This is a Graph-only, client-secret build -
+    $SkipExchange is hardcoded true (see below), so no Exchange Online or
+    Teams PowerShell connection is ever made, and no directory role is
+    needed. An earlier version of this comment listed Exchange.ManageAsApp
+    and a Global Reader/Compliance Reader role requirement left over from
+    when this was cloned from the Advanced-tier (certificate-based) script
+    - confirmed those were dead requirements: Connect-ExchangeOnline only
+    ever runs inside `if (-not $SkipExchange)`, which never evaluates true
+    here.
 
 .PARAMETER TenantId
     Azure AD / Entra tenant GUID.
@@ -842,24 +848,7 @@ if (-not $SkipExchange) {
         $mfReport = @()
     }
 
-    # -- Teams tenant settings (via Graph) ------------------------------------
-    Write-Host "  [30/30] Teams tenant policies (Graph)..." -NoNewline
 }
-
-$TeamsMeetingPolicy = $null
-try {
-    $TeamsMeetingPolicy = Invoke-RestMethod `
-        -Uri "https://graph.microsoft.com/v1.0/teamwork/teamsAppSettings" `
-        -Headers $GraphHeaders -ErrorAction Stop
-} catch { <# endpoint requires delegated auth - skip silently #> }
-
-$TeamsMeetingConfig = $null
-try {
-    $TeamsMeetingConfig = Invoke-RestMethod `
-        -Uri "https://graph.microsoft.com/beta/communications/callSettings" `
-        -Headers $GraphHeaders -ErrorAction Stop
-} catch { <# endpoint requires delegated auth - skip silently #> }
-Write-Host " OK" -ForegroundColor Green
 
 #endregion
 
@@ -1292,21 +1281,6 @@ if (-not $SkipExchange) {
 
 #region -- SECTION 3: Teams --------------------------------------------------
 Write-Section "3 - Microsoft Teams"
-
-# - Teams settings via Graph ---------------------------------------------------
-$TeamsSettings = $null
-try {
-    $TeamsSettings = Invoke-RestMethod `
-        -Uri "https://graph.microsoft.com/v1.0/teamwork" `
-        -Headers $GraphHeaders -ErrorAction Stop
-} catch { <# endpoint requires delegated auth - skip silently #> }
-
-$TeamsFederationSettings = $null
-try {
-    $TeamsFederationSettings = Invoke-RestMethod `
-        -Uri "https://graph.microsoft.com/v1.0/teamwork/teamsAppSettings" `
-        -Headers $GraphHeaders -ErrorAction Stop
-} catch { <# endpoint requires delegated auth - skip silently #> }
 
 # Teams messaging and meeting policies require PowerShell if Teams module is available
 $HasTeamsModule = $false  # GRAPH-ONLY MODE: Teams PowerShell needs a certificate; skipped.
