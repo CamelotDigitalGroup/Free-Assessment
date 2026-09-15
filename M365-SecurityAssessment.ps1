@@ -1,28 +1,31 @@
 <#
 .SYNOPSIS
-    M365 Cloud Security Assessment Script - ADVANCED TIER (certificate-based,
-    full Exchange/Teams coverage). Run manually by Camelot staff during a
-    supervised, white-glove assessment - see this repo's own README.md.
-    This is the version published to the public GitHub repo.
+    M365 Cloud Security Assessment Script - ESSENTIAL TIER (Graph-only,
+    client-secret). Run automatically by the Azure Automation runbook
+    behind camelotdigitalgroup.com's self-serve free-assessment funnel -
+    served to that runbook at request time from this exact file (see
+    app/api/assessment/runner-scripts/[name]/route.ts), not a build-time
+    snapshot, so this file is always what actually runs.
 
-    NOT the script the automated free-assessment funnel on
-    camelotdigitalgroup.com actually runs for the self-serve Essential
-    tier - that's a separate, Graph-only/client-secret variant living in
-    the camelot-website repo at website/free-assessment-scripts/ (not
-    published here, since it authenticates via Camelot's own multi-tenant
-    app registration rather than a customer-provided certificate). Both
-    happen to share this filename; don't assume a change here also needs
-    making there; the report renderer (New-M365Report.ps1) IS shared
-    between them, since JSON->HTML rendering is genuinely tier-agnostic.
+    NOT the certificate-based Advanced-tier script Camelot staff run
+    manually for a supervised assessment, or publish to the public GitHub
+    repo - that's a separate file at free-assessment/M365-SecurityAssessment.ps1
+    in this same repo, with real Exchange/Teams PowerShell connectivity.
+    Both happen to share this filename in their own directory; don't
+    assume a change in one needs making in the other. The report renderer
+    (New-M365Report.ps1) IS shared between them (copied in both places,
+    kept in sync by hand) since JSON->HTML rendering is genuinely
+    tier-agnostic.
 
     Reverse-engineered to reproduce the Sourcepass Cloud Assessment Report
     covering all 7 domains: Entra ID, Exchange, Teams, Intune,
     SharePoint/OneDrive, Defender, and Purview.
 
 .DESCRIPTION
-    Uses certificate-based app-only authentication (Microsoft Graph API +
-    Exchange Online PowerShell) to query tenant security configuration and
-    evaluate each control against the same benchmark used in the report.
+    Uses client-credentials app-only authentication (Microsoft Graph API
+    only - no certificate, no Exchange Online/Teams PowerShell) to query
+    tenant security configuration and evaluate each control against the
+    same benchmark used in the report.
 
     Output:
         1. A structured JSON results file (one object per control)
@@ -58,9 +61,10 @@
 .PARAMETER ClientId
     App registration (service principal) client ID.
 
-.PARAMETER CertThumbprint
-    Thumbprint of the certificate installed in the local machine / current
-    user certificate store that was uploaded to the app registration.
+.PARAMETER ClientSecret
+    Client secret value from the app registration (Certificates & secrets ->
+    Client secrets). Used for the Graph client-credentials flow. No certificate
+    is required in this Graph-only build.
 
 .PARAMETER OutputFolder
     Path where JSON results, CSV tabs, and the summary XLSX are written.
@@ -81,7 +85,7 @@
     .\M365-SecurityAssessment.ps1 `
         -TenantId      "f7c53549-c546-4fab-bab5-8d45ce67f292" `
         -ClientId      "274c5433-710f-46f1-b303-97ec0f5255b8" `
-        -CertThumbprint "B61EDAABAF34649F69959391E1B02D11E7CC1ACE" `
+        -ClientSecret  "<your-client-secret>" `
         -OutputFolder  "C:\Assessments\Output"
 #>
 
@@ -89,7 +93,7 @@
 param(
     [Parameter(Mandatory)][string] $TenantId,
     [Parameter(Mandatory)][string] $ClientId,
-    [Parameter(Mandatory)][string] $CertThumbprint,
+    [Parameter(Mandatory)][string] $ClientSecret,
 
     [string] $OutputFolder    = "C:\Assessments\Output",
     [int]    $MinutesBack     = 1440,
@@ -155,11 +159,13 @@ function Invoke-GraphAll {
     } while ($next)
     # Unary comma is required: PowerShell unwraps a single-element collection
     # to its bare scalar element when it crosses a function return/pipeline
-    # boundary, silently discarding .Count. Confirmed live: a tenant with
-    # exactly one matching config profile/update ring/dynamic group crashed
-    # every caller of this function under Set-StrictMode's .Count check -
-    # every other caller (e.g. EnterpriseApps, 507 results) only "worked" by
-    # having more than one result, not because it was actually safe.
+    # boundary, silently discarding .Count. Confirmed live against a real
+    # tenant - this is a production bug affecting the automated pipeline,
+    # not just the manual Advanced-tier script (same root cause found and
+    # fixed there first, see free-assessment/M365-SecurityAssessment.ps1).
+    # Any real customer tenant with exactly one matching Intune managed
+    # device / config profile / dynamic group etc. would silently lose that
+    # section's data under Set-StrictMode -Version Latest (above).
     return ,$all
 }
 
@@ -181,76 +187,19 @@ function Get-GraphToken {
     param(
         [string]$TenantId,
         [string]$ClientId,
-        [string]$Thumbprint,
+        [string]$ClientSecret,
         [string]$Scope = 'https://graph.microsoft.com/.default'
     )
 
-    # -- Load certificate (check LocalMachine first, then CurrentUser) ------
-    $cert = Get-ChildItem Cert:\LocalMachine\My\$Thumbprint -ErrorAction SilentlyContinue
-    if (-not $cert) {
-        $cert = Get-ChildItem Cert:\CurrentUser\My\$Thumbprint -ErrorAction Stop
-    }
-    if (-not $cert) {
-        throw "Certificate with thumbprint '$Thumbprint' not found in LocalMachine\My or CurrentUser\My."
-    }
-
-    # -- Base64Url helper (strips padding, URL-safe chars) ------------------
-    function ConvertTo-B64Url ([byte[]]$Bytes) {
-        [Convert]::ToBase64String($Bytes) -replace '\+','-' -replace '/','_' -replace '=',''
-    }
-
-    # -- JWT Header ---------------------------------------------------------
-    # x5t = base64url of the certificate's SHA-1 thumbprint bytes
-    $headerJson = [ordered]@{
-        alg = 'RS256'
-        typ = 'JWT'
-        x5t = (ConvertTo-B64Url $cert.GetCertHash())
-    } | ConvertTo-Json -Compress
-    $headerB64 = ConvertTo-B64Url ([Text.Encoding]::UTF8.GetBytes($headerJson))
-
-    # -- JWT Payload --------------------------------------------------------
-    $now = [DateTimeOffset]::UtcNow
-    $payloadJson = [ordered]@{
-        aud = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token"
-        exp = $now.AddMinutes(10).ToUnixTimeSeconds()
-        iss = $ClientId
-        jti = [Guid]::NewGuid().ToString()
-        nbf = $now.ToUnixTimeSeconds()
-        sub = $ClientId
-    } | ConvertTo-Json -Compress
-    $payloadB64 = ConvertTo-B64Url ([Text.Encoding]::UTF8.GetBytes($payloadJson))
-
-    # -- Sign header.payload with RSA-SHA256 --------------------------------
-    # Use GetRSAPrivateKey() - supports both modern CNG and legacy CAPI certs.
-    # $cert.PrivateKey only works on CAPI and silently returns null for CNG.
-    $toSign      = "$headerB64.$payloadB64"
-    $toSignBytes = [Text.Encoding]::UTF8.GetBytes($toSign)
-
-    $rsaKey = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert)
-    if ($rsaKey) {
-        # CNG path (RSACng / RSAOpenSsl) - works on Windows 8+ / PowerShell 5.1+
-        $sigBytes = $rsaKey.SignData(
-            $toSignBytes,
-            [Security.Cryptography.HashAlgorithmName]::SHA256,
-            [Security.Cryptography.RSASignaturePadding]::Pkcs1
-        )
-    } else {
-        # CAPI fallback (legacy RSACryptoServiceProvider)
-        $rsaCapi  = $cert.PrivateKey
-        if (-not $rsaCapi) { throw "Cannot access private key for certificate '$Thumbprint'. Verify the key is exportable and the certificate is in the correct store." }
-        $sigBytes = $rsaCapi.SignData($toSignBytes, [Security.Cryptography.HashAlgorithmName]::SHA256)
-    }
-
-    $jwt = "$toSign.$(ConvertTo-B64Url $sigBytes)"
-
-    # -- Token request ------------------------------------------------------
-    # FIX: client_assertion_type must be 'client-assertion-type', NOT 'grant-type'
+    # -- Client-credentials flow using a client secret (no certificate) ------
+    # After the customer grants admin consent to this multi-tenant app, we can
+    # mint an app-only Graph token scoped to THEIR tenant simply by passing
+    # their TenantId here. Nothing is installed on the target tenant.
     $tokenBody = @{
-        grant_type            = 'client_credentials'
-        client_id             = $ClientId
-        client_assertion_type = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'
-        client_assertion      = $jwt
-        scope                 = $Scope
+        grant_type    = 'client_credentials'
+        client_id     = $ClientId
+        client_secret = $ClientSecret
+        scope         = $Scope
     }
 
     $response = Invoke-RestMethod `
@@ -267,10 +216,10 @@ function Get-GraphToken {
 if (-not (Test-Path $OutputFolder)) { New-Item $OutputFolder -ItemType Directory | Out-Null }
 
 # Verify Exchange Online module
-if (-not (Get-Module ExchangeOnlineManagement -ListAvailable)) {
-    Write-Warning "ExchangeOnlineManagement module not found. Exchange checks will be skipped."
-    $SkipExchange = $true
-} else { $SkipExchange = $false }
+# GRAPH-ONLY MODE: Exchange Online app-only PowerShell requires a certificate,
+# which this client-secret build intentionally does not use. Exchange-specific
+# checks are therefore skipped and reported as MANUAL in the results.
+$SkipExchange = $true
 
 # Verify ImportExcel (for XLSX output - optional, falls back to CSV)
 $HasImportExcel = [bool](Get-Module ImportExcel -ListAvailable)
@@ -281,10 +230,14 @@ $HasImportExcel = [bool](Get-Module ImportExcel -ListAvailable)
 
 Write-Section "Authenticating"
 
-Write-Host "  Getting Microsoft Graph token (certificate)..." -NoNewline
-$GraphToken    = Get-GraphToken -TenantId $TenantId -ClientId $ClientId -Thumbprint $CertThumbprint
+Write-Host "  Getting Microsoft Graph token (client secret)..." -NoNewline
+$GraphToken    = Get-GraphToken -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
 $GraphHeaders  = @{ Authorization = "Bearer $GraphToken"; 'Content-Type' = 'application/json' }
 Write-Host " OK" -ForegroundColor Green
+
+# Fetch organisation info up front so it is available whether or not Exchange
+# Online is connected (the Graph-only build skips Exchange but still needs $OrgInfo).
+$OrgInfo = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/organization" -Headers $GraphHeaders
 
 if (-not $SkipExchange) {
     Write-Host "  Connecting Exchange Online (certificate)..." -NoNewline
@@ -292,11 +245,10 @@ if (-not $SkipExchange) {
     # Resolve the default domain name into a plain string BEFORE passing it
     # to Connect-ExchangeOnline.  Doing it inline with a pipeline causes PS
     # to pipe the Connect-ExchangeOnline output instead of the inner expression.
-    $OrgInfo      = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/organization" -Headers $GraphHeaders
     $ExoOrg       = ($OrgInfo.value[0].verifiedDomains | Where-Object { $_.isDefault } | Select-Object -First 1).name
 
     Connect-ExchangeOnline `
-        -CertificateThumbprint $CertThumbprint `
+        -CertificateThumbprint $null `
         -AppId                 $ClientId `
         -Organization          $ExoOrg `
         -ShowBanner:$false `
@@ -763,13 +715,8 @@ $MdeDevices       = @()   # Requires Defender API (separate token scope); skippe
 $DefenderEnrolled = @($IntuneDevices | Where-Object { $_.managedDeviceOwnerType -ne $null })
 Write-Host " Using Intune proxy ($($DefenderEnrolled.Count) Windows devices)" -ForegroundColor Green
 
+
 # -- Licensing / Subscribed SKUs ----------------------------------------------
-# Ported from the Essential-tier script (website/free-assessment-scripts) -
-# this data was never collected here at all, not gated by any permission or
-# licensing issue. New-M365Report.ps1's Licensing/Authentication Methods
-# pages are shared/tier-agnostic and expect these fields; without them they
-# rendered a misleading "permission missing" message on every Advanced-tier
-# report, even with every permission correctly granted. Confirmed live.
 Write-Host "  [+] Licensing (subscribed SKUs)..." -NoNewline
 $SubscribedSkus = @()
 try {
@@ -777,11 +724,29 @@ try {
     # unconditional 400 Bad Request regardless of tenant size or
     # permissions. Confirmed live: with $top=999 this always failed;
     # without it, the call succeeds (this endpoint is never large enough
-    # to need paging - it's one row per purchased licence SKU).
+    # to need paging - it's one row per purchased licence SKU). This means
+    # the Licensing Overview report page has been broken/empty on every
+    # real customer report generated by this pipeline until now.
     $SubscribedSkus = Invoke-GraphAll `
         -Uri "https://graph.microsoft.com/v1.0/subscribedSkus" `
         -Headers $GraphHeaders
     Write-Host " $($SubscribedSkus.Count) SKU(s)" -ForegroundColor Green
+} catch {
+    Write-Host " SKIPPED ($($_.Exception.Message))" -ForegroundColor Yellow
+}
+
+# -- Mail Activity Report (Graph Reports API) --------------------------------
+Write-Host "  [+] Email activity report (last 30 days)..." -NoNewline
+$MailActivityReport = @()
+try {
+    $maUri  = "https://graph.microsoft.com/v1.0/reports/getEmailActivityCounts(period='D30')"
+    $maCsv  = Invoke-RestMethod -Uri $maUri -Headers $GraphHeaders -ErrorAction Stop
+    # Graph returns CSV text; parse it
+    $maLines = ($maCsv -split "`n" | Where-Object { $_.Trim() -ne '' })
+    if ($maLines.Count -gt 1) {
+        $MailActivityReport = $maLines | Select-Object -Skip 1 | ConvertFrom-Csv -Header ($maLines[0] -split ',')
+    }
+    Write-Host " $($MailActivityReport.Count) day(s)" -ForegroundColor Green
 } catch {
     Write-Host " SKIPPED ($($_.Exception.Message))" -ForegroundColor Yellow
 }
@@ -798,20 +763,27 @@ try {
     Write-Host " SKIPPED ($($_.Exception.Message))" -ForegroundColor Yellow
 }
 
+# -- Cross-Tenant Access / External Collaboration Settings --------------------
+Write-Host "  [+] External collaboration settings..." -NoNewline
+$ExternalCollabSettings = $null
+try {
+    $ExternalCollabSettings = Invoke-RestMethod `
+        -Uri "https://graph.microsoft.com/v1.0/policies/crossTenantAccessPolicy" `
+        -Headers $GraphHeaders -ErrorAction Stop
+    Write-Host " OK" -ForegroundColor Green
+} catch {
+    Write-Host " SKIPPED ($($_.Exception.Message))" -ForegroundColor Yellow
+}
+
 # -- Mailboxes (Exchange) ------------------------------------------------------
 if (-not $SkipExchange) {
     Write-Host "  [25/30] Mailboxes (Exchange Online)..." -NoNewline
-    $Mailboxes = @(Get-Mailbox -ResultSize Unlimited -Filter { RecipientTypeDetails -ne 'SharedMailbox' })
+    $Mailboxes = Get-Mailbox -ResultSize Unlimited -Filter { RecipientTypeDetails -ne 'SharedMailbox' }
     Write-Host " $($Mailboxes.Count)" -ForegroundColor Green
 
     # -- Transport Rules ------------------------------------------------------
     Write-Host "  [26/30] Transport rules..." -NoNewline
-    # @() wrap required: Get-TransportRule returns raw $null (not an empty
-    # array) on a tenant with zero rules, and Set-StrictMode -Version Latest
-    # (see top of script) throws "property 'Count' cannot be found" on
-    # $null.Count - confirmed live against a real tenant with no transport
-    # rules, which killed the entire assessment run at this step.
-    $TransportRules = @(Get-TransportRule)
+    $TransportRules = Get-TransportRule
     Write-Host " $($TransportRules.Count)" -ForegroundColor Green
 
     # -- Inbox Rules ---------------------------------------------------------
@@ -839,16 +811,13 @@ if (-not $SkipExchange) {
 
     # -- Anti-Phishing --------------------------------------------------------
     Write-Host "  [28/30] Anti-phishing policies..." -NoNewline
-    $AntiPhishPolicies = @(Get-AntiPhishPolicy)
+    $AntiPhishPolicies = Get-AntiPhishPolicy
     Write-Host " $($AntiPhishPolicies.Count)" -ForegroundColor Green
 
     # -- Safe Links / Safe Attachments ----------------------------------------
     Write-Host "  [29/30] Safe Links / Safe Attachments..." -NoNewline
-    # Same $null.Count-under-StrictMode risk as Transport Rules above - a
-    # tenant without Defender for Office 365 add-on licensing has zero
-    # custom Safe Links/Safe Attachment policies by default.
-    $SafeLinksPolicies      = @(Get-SafeLinksPolicy)
-    $SafeAttachmentPolicies = @(Get-SafeAttachmentPolicy)
+    $SafeLinksPolicies      = Get-SafeLinksPolicy
+    $SafeAttachmentPolicies = Get-SafeAttachmentPolicy
     Write-Host " SafeLinks=$($SafeLinksPolicies.Count) SafeAtt=$($SafeAttachmentPolicies.Count)" -ForegroundColor Green
 
     # -- DKIM signing configuration (for Email Health report page) -------------
@@ -1223,10 +1192,11 @@ Write-Section "2 - Exchange Online"
 # - 2.1 SPF records -------------------------------------------------------
 # Deliberately OUTSIDE the SkipExchange gate below: this is a plain public
 # DNS lookup (Resolve-DnsName), not an Exchange Online PowerShell cmdlet -
-# it needs no certificate, no Exchange.ManageAsApp, no extra consent at all.
-# Previously withheld from the Essential tier for no real technical reason,
-# unlike 2.3-2.6 below which genuinely need Get-AntiPhishPolicy/
-# Get-ExternalInOutlook/Get-TransportRule/Get-OrganizationConfig.
+# it needs no certificate, no Exchange.ManageAsApp, no extra consent at all,
+# so there's no real reason to withhold it from this (Essential/free) tier.
+# Confirmed: 2.3-2.6 below genuinely need Get-AntiPhishPolicy/
+# Get-ExternalInOutlook/Get-TransportRule/Get-OrganizationConfig and stay
+# tier-gated; 2.1/2.2 don't.
 #
 # Excludes *.onmicrosoft.com - Microsoft owns that DNS zone, so neither the
 # customer nor Camelot can ever publish a record there. Without this,
@@ -1308,9 +1278,13 @@ if (-not $SkipExchange) {
     Write-Check "2.6 Exchange audit logging" $status_2_6
 
 } else {
-    Write-Host "  Exchange checks skipped (module not available)" -ForegroundColor Yellow
-    foreach ($c in @('2.1','2.2','2.3','2.4','2.5','2.6')) {
-        Add-Result '2-Exchange' $c "Exchange check $c" 'MANUAL' 'medium' 'ExchangeOnlineManagement module not installed.'
+    Write-Host "  Exchange checks skipped (Advanced tier only)" -ForegroundColor Yellow
+    # 2.1/2.2 (SPF/DMARC) already ran unconditionally above - only the
+    # checks that genuinely need certificate-based Exchange access are
+    # tier-gated here.
+    foreach ($c in @('2.3','2.4','2.5','2.6')) {
+        Add-Result '2-Exchange' $c 'Not included in this assessment tier' 'MANUAL' 'medium' `
+            'Deep Exchange Online mailbox security checks require certificate-based access, included in our Advanced assessment. Ask us about upgrading for full mailbox security coverage.'
     }
 }
 
@@ -1335,10 +1309,10 @@ try {
 } catch { <# endpoint requires delegated auth - skip silently #> }
 
 # Teams messaging and meeting policies require PowerShell if Teams module is available
-$HasTeamsModule = [bool](Get-Module MicrosoftTeams -ListAvailable)
+$HasTeamsModule = $false  # GRAPH-ONLY MODE: Teams PowerShell needs a certificate; skipped.
 if ($HasTeamsModule) {
     try {
-        Connect-MicrosoftTeams -CertificateThumbprint $CertThumbprint `
+        Connect-MicrosoftTeams -CertificateThumbprint $null `
             -ApplicationId $ClientId -TenantId $TenantId
         $TeamsTenantConfig        = Get-CsTenantFederationConfiguration
         $TeamsMeetingPolicyDefault = Get-CsTeamsMeetingPolicy -Identity Global
@@ -1348,30 +1322,13 @@ if ($HasTeamsModule) {
 }
 
 # - 3.1 External user access restricted ---------------------------------------
-# AllowedDomains is not a domain list to count - per Microsoft's own docs
-# (Set-CsTenantFederationConfiguration), it's either the literal string
-# 'AllowAllKnownDomains' (federate with anyone not explicitly blocked - the
-# LEAST restrictive setting) or an actual list of specifically allowed
-# domains (restricted). BlockedDomains only has any effect in the former
-# mode. Confirmed live: a default/unconfigured tenant returns the string
-# 'AllowAllKnownDomains', which the old .Count-based check (any non-empty
-# value wrapped in @() has Count -ge 1) wrongly scored as PASS - the exact
-# opposite of the real posture. AllowFederatedUsers = $false is the fully-
-# blocked case and is the most restrictive outcome regardless of the rest.
 if ($HasTeamsModule) {
-    $allowFederated = Get-Prop $TeamsTenantConfig 'AllowFederatedUsers'
-    $allowedDomains = Get-Prop $TeamsTenantConfig 'AllowedDomains'
-    if ($allowFederated -eq $false) {
-        $extDomainsRestricted = $true
-    } elseif ("$allowedDomains" -eq 'AllowAllKnownDomains') {
-        $extDomainsRestricted = $false
-    } else {
-        $extDomainsRestricted = $true
-    }
+    $extDomainsRestricted = $TeamsTenantConfig.AllowedDomains.Count -gt 0 -or
+                            $TeamsTenantConfig.BlockedDomains.Count -gt 0
     $status_3_1 = if ($extDomainsRestricted) {'PASS'} else {'FAIL'}
 } else { $status_3_1 = 'MANUAL' }
 Add-Result '3-Teams' '3.1' 'Ensure external domains are restricted in the Teams admin center' $status_3_1 'medium' `
-    $(if ($status_3_1 -eq 'PASS') {'Teams policy configured.'} else {'Federation is set to allow all known domains rather than a specific allow-list, or manual review required.'})
+    $(if ($status_3_1 -eq 'PASS') {'Teams policy configured.'} else {'Not included in this assessment tier - requires certificate-based Teams PowerShell access, available with our Advanced assessment.'})
 Write-Check "3.1 External user access" $status_3_1
 
 # - 3.2 External participants cannot request screen control --------------------
@@ -1380,7 +1337,7 @@ if ($HasTeamsModule) {
     $status_3_2  = if ($extControl -eq $false) {'PASS'} else {'FAIL'}
 } else { $status_3_2 = 'MANUAL' }
 Add-Result '3-Teams' '3.2' "Ensure external participants can't give or request control" $status_3_2 'low' `
-    $(if ($status_3_2 -eq 'PASS') {'Teams Policy configured accurately.'} else {'External screen control is enabled or manual review required.'})
+    $(if ($status_3_2 -eq 'PASS') {'Teams Policy configured accurately.'} else {'Not included in this assessment tier - requires certificate-based Teams PowerShell access, available with our Advanced assessment.'})
 Write-Check "3.2 External screen control" $status_3_2
 
 # - 3.3 Anonymous users cannot start meetings ----------------------------------
@@ -1389,7 +1346,7 @@ if ($HasTeamsModule) {
     $status_3_3 = if ($anonStart -eq $false) {'PASS'} else {'FAIL'}
 } else { $status_3_3 = 'MANUAL' }
 Add-Result '3-Teams' '3.3' "Ensure anonymous users and dial-in callers can't start a meeting" $status_3_3 'medium' `
-    $(if ($status_3_3 -eq 'PASS') {'Teams Policy configured accurately.'} else {'Anonymous meeting start is enabled.'})
+    $(if ($status_3_3 -eq 'PASS') {'Teams Policy configured accurately.'} else {'Not included in this assessment tier - requires certificate-based Teams PowerShell access, available with our Advanced assessment.'})
 Write-Check "3.3 Anonymous meeting start" $status_3_3
 
 # - 3.4 Lobby bypass restricted ------------------------------------------------
@@ -1398,7 +1355,7 @@ if ($HasTeamsModule) {
     $status_3_4  = if ($lobbyBypass -in @('OrganizerOnly','InvitedUsers','OrgOnly')) {'PASS'} else {'FAIL'}
 } else { $status_3_4 = 'MANUAL' }
 Add-Result '3-Teams' '3.4' 'Ensure only people in my org can bypass the lobby' $status_3_4 'low' `
-    $(if ($status_3_4 -eq 'PASS') {'Teams Policy configured accurately.'} else {'Teams Policy misconfigured.'})
+    $(if ($status_3_4 -eq 'PASS') {'Teams Policy configured accurately.'} else {'Not included in this assessment tier - requires certificate-based Teams PowerShell access, available with our Advanced assessment.'})
 Write-Check "3.4 Lobby bypass" $status_3_4
 
 # - 3.5 Unmanaged users cannot initiate contact --------------------------------
@@ -1407,21 +1364,16 @@ if ($HasTeamsModule) {
     $status_3_5       = if ($unmanagedContact -eq $false) {'PASS'} else {'FAIL'}
 } else { $status_3_5 = 'MANUAL' }
 Add-Result '3-Teams' '3.5' 'Unmanaged users SHALL NOT be enabled to initiate contact with internal users.' $status_3_5 'low' `
-    $(if ($status_3_5 -eq 'PASS') {'Teams Policy configured accurately.'} else {'Teams Policy misconfigured.'})
+    $(if ($status_3_5 -eq 'PASS') {'Teams Policy configured accurately.'} else {'Not included in this assessment tier - requires certificate-based Teams PowerShell access, available with our Advanced assessment.'})
 Write-Check "3.5 Unmanaged user contact" $status_3_5
 
 # - 3.6 Skype communication blocked --------------------------------------------
 if ($HasTeamsModule) {
-    # AllowPublicUsers was removed from Get-CsTenantFederationConfiguration's
-    # schema after Microsoft retired Skype consumer interop - confirmed live
-    # against a real tenant (the property is genuinely absent, not $null).
-    # Get-Prop is safe against StrictMode's throw-on-missing-property; report
-    # MANUAL rather than fabricate PASS/FAIL from data that no longer exists.
-    $skypeComm = Get-Prop $TeamsTenantConfig 'AllowPublicUsers'
-    $status_3_6 = if ($null -eq $skypeComm) { 'MANUAL' } elseif ($skypeComm -eq $false) { 'PASS' } else { 'FAIL' }
+    $skypeComm  = $TeamsTenantConfig.AllowPublicUsers
+    $status_3_6 = if ($skypeComm -eq $false) {'PASS'} else {'FAIL'}
 } else { $status_3_6 = 'MANUAL' }
 Add-Result '3-Teams' '3.6' 'Ensure communication with Skype users is disabled' $status_3_6 'low' `
-    $(if ($status_3_6 -eq 'MANUAL' -and $HasTeamsModule) {'Skype consumer interop has been retired by Microsoft; this setting no longer applies.'} elseif ($status_3_6 -eq 'PASS') {'Teams Policy configured accurately.'} else {'Skype communication not blocked.'})
+    $(if ($status_3_6 -eq 'PASS') {'Teams Policy configured accurately.'} else {'Not included in this assessment tier - requires certificate-based Teams PowerShell access, available with our Advanced assessment.'})
 Write-Check "3.6 Skype communication blocked" $status_3_6
 
 # - 3.7 3rd party file sharing blocked ----------------------------------------
@@ -1433,7 +1385,7 @@ if ($HasTeamsModule) {
     $status_3_7  = if (-not $thirdPartyFiles) {'PASS'} else {'FAIL'}
 } else { $status_3_7 = 'MANUAL' }
 Add-Result '3-Teams' '3.7' 'Ensure external file sharing in Teams is enabled for only approved cloud storage services' $status_3_7 'low' `
-    $(if ($status_3_7 -eq 'PASS') {'3rd party file sharing is blocked.'} else {'3rd party file sharing is not blocked in Teams'})
+    $(if ($status_3_7 -eq 'PASS') {'3rd party file sharing is blocked.'} else {'Not included in this assessment tier - requires certificate-based Teams PowerShell access, available with our Advanced assessment.'})
 Write-Check "3.7 3rd party file sharing" $status_3_7
 
 #endregion
@@ -1656,7 +1608,9 @@ if (-not $SkipExchange -and $SafeLinksPolicies) {
 }
 $status_6_5 = if ($hasActiveSafeLinks) {'PASS'} elseif ($SkipExchange) {'MANUAL'} else {'FAIL'}
 Add-Result '6-Defender' '6.5' 'Safe Links policies are configured' $status_6_5 'high' `
-    $(if ($status_6_5 -eq 'PASS') {'Safe Links policies are present and correctly configured.'} else {'Safe Links policy not found or Exchange module unavailable.'})
+    $(if ($status_6_5 -eq 'PASS') {'Safe Links policies are present and correctly configured.'} `
+      elseif ($status_6_5 -eq 'MANUAL') {'Not included in this assessment tier - requires certificate-based Exchange Online access, available with our Advanced assessment.'} `
+      else {'No active Safe Links policy found.'})
 Write-Check "6.5 Safe Links" $status_6_5
 
 # - 6.6 Safe Attachments ------------------------------------------------------
@@ -1668,7 +1622,9 @@ if (-not $SkipExchange -and $SafeAttachmentPolicies) {
 }
 $status_6_6 = if ($hasActiveSafeAtt) {'PASS'} elseif ($SkipExchange) {'MANUAL'} else {'FAIL'}
 Add-Result '6-Defender' '6.6' 'Safe Attachment Policies are configured' $status_6_6 'high' `
-    $(if ($status_6_6 -eq 'PASS') {'Active Safe Attachment policy found'} else {'No active Safe Attachment policy.'})
+    $(if ($status_6_6 -eq 'PASS') {'Active Safe Attachment policy found'} `
+      elseif ($status_6_6 -eq 'MANUAL') {'Not included in this assessment tier - requires certificate-based Exchange Online access, available with our Advanced assessment.'} `
+      else {'No active Safe Attachment policy.'})
 Write-Check "6.6 Safe Attachments" $status_6_6
 
 # - 6.7 Tamper Protection (MANUAL / Defender for Endpoint API) ----------------
@@ -1866,6 +1822,8 @@ Write-Host " $($EmailHealth.Count) domains" -ForegroundColor Green
 
 # -- Mail-flow summary (last 30 days) -----------------------------------------
 $mfScanned = 0; $mfDelivered = 0; $mfBlocked = 0
+
+# Try Exchange-based stats first (available when -SkipExchange is not set)
 foreach ($row in $mfReport) {
     $cnt = 0
     $rawCnt = Get-Prop $row 'MessageCount'
@@ -1874,6 +1832,20 @@ foreach ($row in $mfReport) {
     $evt = "$(Get-Prop $row 'EventType')"
     if ($evt -match 'GoodMail|Delivered') { $mfDelivered += $cnt } else { $mfBlocked += $cnt }
 }
+
+# Fall back to Graph Reports API data when Exchange was skipped
+if ($mfScanned -eq 0 -and $MailActivityReport.Count -gt 0) {
+    foreach ($day in $MailActivityReport) {
+        $s = 0; $r = 0; $sp = 0
+        try { $s  = [int64]($day.'Send Count') }       catch {}
+        try { $r  = [int64]($day.'Receive Count') }    catch {}
+        try { $sp = [int64]($day.'Spam Receive Count') } catch {}
+        $mfDelivered += ($s + $r)
+        $mfBlocked   += $sp
+    }
+    $mfScanned = $mfDelivered + $mfBlocked
+}
+
 $MailFlow = @{
     EmailsScanned   = $mfScanned
     EmailsDelivered = $mfDelivered
@@ -1884,10 +1856,9 @@ $MailFlow = @{
 $exportObj = [ordered]@{
     GeneratedAt    = (Get-Date -Format 'o')
     # Read by New-M365Report.ps1 to select tier-accurate report copy (this
-    # is the certificate-based, Advanced-tier script - see the SYNOPSIS
-    # above). Not present in JSON generated before this field existed;
-    # the report defaults to 'Essential' when it's missing.
-    AssessmentTier = 'Advanced'
+    # is the Graph-only, client-secret Essential-tier script - see the
+    # SYNOPSIS above).
+    AssessmentTier = 'Essential'
     TenantId       = $TenantId
     DefaultDomain  = $DefaultDomain
     SecureScore    = @{
@@ -1944,6 +1915,16 @@ $exportObj = [ordered]@{
             }
         })
     } else { @() }
+    GuestAccess    = @{
+        GuestUserCount = $GuestUsers.Count
+        TotalUsers     = $AllUsers.Count
+        GuestInviteSettings = if ($AuthPolicy) {
+            [string](Get-Prop $AuthPolicy 'allowInvitesFrom')
+        } else { 'Unknown' }
+        CrossTenantAccessPolicy = if ($ExternalCollabSettings) {
+            [string]($ExternalCollabSettings | ConvertTo-Json -Depth 3 -Compress)
+        } else { 'Not available' }
+    }
     Controls       = $Results
 }
 $exportObj | ConvertTo-Json -Depth 10 | Out-File $JsonPath -Encoding UTF8
@@ -1955,6 +1936,7 @@ Write-Host "  CSV   -> $SummaryPath" -ForegroundColor Green
 
 # -- Excel workbook (if ImportExcel module available) -------------------------
 if ($HasImportExcel) {
+  try {
     $XlsxPath = Join-Path $OutputFolder "Assessment_Workbook_$Timestamp.xlsx"
 
     # Tab 1 - Control Results
@@ -2065,6 +2047,9 @@ if ($HasImportExcel) {
         Export-Excel $XlsxPath -WorksheetName 'SecureScoreHistory' -AutoFilter -BoldTopRow -AutoSize -Append
 
     Write-Host "  XLSX  -> $XlsxPath" -ForegroundColor Green
+  } catch {
+    Write-Host "  XLSX generation failed - continuing without workbook: $($_.Exception.Message)" -ForegroundColor Yellow
+  }
 } else {
     Write-Host "  (ImportExcel module not available - install with: Install-Module ImportExcel)" -ForegroundColor Yellow
     Write-Host "  CSV written instead: $SummaryPath" -ForegroundColor Yellow
