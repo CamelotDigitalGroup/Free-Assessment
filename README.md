@@ -51,7 +51,7 @@ This file being public is what lets you verify that story rather than take our w
 ## Scope
 
 This assessment authenticates to **Microsoft Graph only** — no Exchange Online or Microsoft
-Teams PowerShell connection, since those require certificate-based app-only auth, which this
+Teams PowerShell connections, since those require certificate-based app-only auth, which this
 free tier deliberately doesn't use. Any control that depends on Exchange or Teams data
 (mailbox/transport rules, Teams external-access policies, etc.) is reported as requiring manual
 review, not silently skipped or guessed at.
@@ -60,8 +60,8 @@ Want deeper coverage, including a full Exchange Online and Teams review? That's 
 assessment — a supervised, certificate-based engagement we run live with you on a call, then
 fully clean up afterwards. It isn't published in this repo (elevated, standing access shouldn't
 be something anyone can run unsupervised), but if you're working with us on one, we'll share that
-script with you directly as part of the engagement — nothing about it is a black box, it's just
-not broadcast to the public internet by default. **[Get in touch](https://camelotdigitalgroup.com/free-assessment)**
+script with you directly as part of the engagement. Nothing about it is a black box — it's
+simply not broadcast to the public internet by default. **[Get in touch](https://camelotdigitalgroup.com/free-assessment)**
 to arrange one.
 
 ---
